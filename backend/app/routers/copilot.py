@@ -144,7 +144,8 @@ def _llm() -> Any:
 
     if not (utilities.OPENAI_API_KEY and utilities.BASE_URL):
         return None
-    return utilities.get_llm_model(model_name=os.getenv("ECOS_LLM_MODEL", utilities.MODEL_GPT_4O), temperature=0.2)
+    return utilities.get_llm_model(model_name=os.getenv("ECOS_LLM_MODEL", utilities.MODEL_GPT_4O), temperature=0.2,
+                                   max_retries=0)
 
 
 def _context(db: Any, intent: str, answer: str, evidence: list[str]) -> dict[str, Any]:
@@ -187,7 +188,7 @@ def _llm_answer(db: Any, question: str, intent: str, answer: str, evidence: list
 
 @router.post("/copilot")
 def ask(payload: CopilotRequest, _: dict = Depends(require_manager), db: Any = Depends(get_db)) -> dict:
-    question = re.sub(r"[^a-z0-9 -]", " ", payload.question.lower())
+    question = re.sub(r"(?<=[a-z])-(?=[a-z])", " ", re.sub(r"[^a-z0-9 -]", " ", payload.question.lower()))
     words = set(question.split())
     if words & {"affected", "affect", "affects", "uses", "dependent"} and (hit := _affected(db, question)):
         intent, (answer, evidence) = "affected_dishes", hit

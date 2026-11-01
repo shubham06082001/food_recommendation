@@ -50,5 +50,6 @@ def render_profile() -> None:
     if name.strip():
         st.session_state["user_name"] = name.strip()
     api.recommendations.clear()
+    api.meal_plan.clear()
     st.success("Preferences saved. Your recommendations are now personalised.", icon=":material/check_circle:")
     st.button("See my recommendations", type="primary", on_click=go_to, args=("Menu",))

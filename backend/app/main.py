@@ -6,9 +6,10 @@ from pymongo.errors import PyMongoError
 
 from .core.config import settings
 from .core.database import get_db, init_client
+from .core.enrich import enrich_in_background
 from .core.seed import seed
 from .routers import (
-    copilot, dashboard, feedback, forecasts, health, inventory, menus,
+    copilot, dashboard, feedback, forecasts, health, inventory, inventory_consumption, menus,
     orders, recipes, recommendations, uploads, users, wellness,
 )
 
@@ -18,6 +19,7 @@ async def lifespan(_: FastAPI):
     init_client()
     if settings.seed_on_startup:
         seed(get_db())
+    enrich_in_background(get_db())
     yield
 
 
@@ -31,6 +33,6 @@ async def database_error(_: Request, error: PyMongoError) -> JSONResponse:
 
 for module in (
     health, users, recipes, menus, recommendations, orders, feedback,
-    inventory, uploads, forecasts, wellness, dashboard, copilot,
+    inventory, inventory_consumption, uploads, forecasts, wellness, dashboard, copilot,
 ):
     app.include_router(module.router, prefix="/api/v1", tags=[module.__name__.rsplit(".", 1)[-1]])

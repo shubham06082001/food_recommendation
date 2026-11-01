@@ -31,6 +31,15 @@ INGREDIENTS = [
     ("ING_SPROUTS", "Moong sprouts", 3000, "g", 800),
 ]
 
+INGREDIENT_CATEGORIES = {
+    "ING_PANEER": "dairy, cheese", "ING_MILK": "dairy", "ING_PEAS": "vegetable, legume",
+    "ING_SPINACH": "leafy green vegetable", "ING_RICE": "grain, cereal", "ING_MOONG": "pulse, lentil, legume",
+    "ING_RAJMA": "pulse, kidney bean, legume", "ING_MIXDAL": "pulse, lentil, legume", "ING_TOMATO": "vegetable",
+    "ING_ONION": "vegetable", "ING_MIXVEG": "vegetable", "ING_SEMOLINA": "grain, wheat cereal",
+    "ING_DALIA": "grain, wheat cereal", "ING_IDLI": "fermented rice and lentil batter", "ING_EGG": "egg, protein",
+    "ING_BREAD": "bakery, wheat grain", "ING_MUTTON": "meat, protein", "ING_SPROUTS": "pulse, sprouted legume",
+}
+
 # dish_id, name, catalog_code, price, diet, meal_periods, allergens, protein, fibre, sodium, kcal, ingredients
 RECIPES = [
     ("DISH_RAVA_DALIA", "Semolina porridge (Rava daliya)", "ASC048", 60, "veg", ["breakfast"],
@@ -61,6 +70,15 @@ RECIPES = [
      ["egg", "wheat"], 12.4, 3.0, 334, 290, [("ING_EGG", 2), ("ING_BREAD", 2)]),
 ]
 
+# Wikipedia article (or search term) whose lead Wikimedia Commons photo illustrates each dish.
+IMAGE_QUERIES = {
+    "DISH_RAVA_DALIA": "Upma", "DISH_MEETHA_DALIA": "Dalia porridge", "DISH_IDLI": "Idli",
+    "DISH_EGG_BHURJI": "Egg bhurji", "DISH_MATAR_PANEER": "Matar paneer", "DISH_PALAK_PANEER": "Palak paneer",
+    "DISH_VEG_BIRYANI": "Vegetable biryani", "DISH_RAJMA": "Rajma", "DISH_MOONG_DAL": "Dal tadka",
+    "DISH_MIXED_DAL": "Dal", "DISH_MUTTON_BIRYANI": "Hyderabadi biryani", "DISH_SPROUT_CHAAT": "Chaat",
+    "DISH_EGG_SANDWICH": "Egg sandwich",
+}
+
 
 def recipe_documents() -> list[dict[str, Any]]:
     docs = []
@@ -72,7 +90,7 @@ def recipe_documents() -> list[dict[str, Any]]:
             "nutrition": {"protein_g": protein, "fibre_g": fibre, "sodium_mg": sodium, "energy_kcal": kcal},
             "nutrition_tags": nutrition_tags(protein, fibre, sodium, kcal),
             "ingredients": [{"ingredient_id": i, "quantity": q, "unit": units[i]} for i, q in lines],
-            "evidence_status": "confirmed", "updated_at": now_utc(),
+            "evidence_status": "confirmed", "image_query": IMAGE_QUERIES.get(dish_id), "updated_at": now_utc(),
         })
     return docs
 
@@ -97,11 +115,18 @@ def seed(db: Any) -> None:
                                               "created_at": now_utc()}}, upsert=True)
     if db.ingredients.count_documents({}) == 0:
         db.ingredients.insert_many([
-            {"ingredient_id": i, "name": n, "quantity": q, "unit": u, "reorder_point": r, "updated_at": now_utc()}
+            {"ingredient_id": i, "name": n, "quantity": q, "unit": u, "reorder_point": r,
+             "category": INGREDIENT_CATEGORIES.get(i, ""), "updated_at": now_utc()}
             for i, n, q, u, r in INGREDIENTS
         ])
+    for ingredient_id, category in INGREDIENT_CATEGORIES.items():
+        db.ingredients.update_one({"ingredient_id": ingredient_id, "category": {"$exists": False}},
+                                  {"$set": {"category": category}})
     if db.recipes.count_documents({}) == 0:
         db.recipes.insert_many(recipe_documents())
+    for dish_id, query in IMAGE_QUERIES.items():
+        db.recipes.update_one({"dish_id": dish_id, "image_query": {"$exists": False}},
+                              {"$set": {"image_query": query}, "$unset": {"image_url": ""}})
     ensure_menus(db, today())
 
 

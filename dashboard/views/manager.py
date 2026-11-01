@@ -199,13 +199,65 @@ def render_inventory() -> None:
     cols[0].metric("Healthy", counts["HEALTHY"])
     cols[1].metric("Critical", counts["CRITICAL"], help="At or below reorder point")
     cols[2].metric("Stockout", counts["STOCKOUT"])
-    stock_tab, update_tab, risk_tab = st.tabs(["Stock", "Update stock", "Risk & impact"])
+    stock_tab, usage_tab, update_tab, risk_tab = st.tabs(["Stock", "Today's consumption", "Edit stock",
+                                                          "Risk & impact"])
     with stock_tab:
         _stock_table(items)
+    with usage_tab:
+        _consumption_panel()
     with update_tab:
         _update_stock(items)
     with risk_tab:
         _risk_panel()
+
+
+def _consumption_panel() -> None:
+    filters = st.columns((1, 2.4), vertical_alignment="bottom")
+    day = filters[0].date_input("Service day", value=date.today(), key="use_day")
+    focus = filters[1].text_input("Focus on (semantic search)", key="use_focus", max_chars=100,
+                                  placeholder="e.g. dairy, leafy greens, pulses, grains, protein")
+    data = api.load("/inventory/consumption", date=day.isoformat(), query=focus.strip() or None)
+    if data is None:
+        return
+    totals = data["totals"]
+    cols = st.columns(3)
+    cols[0].metric("Orders", totals["orders"], help="All orders for the day, including cancelled")
+    cols[1].metric("Portions served", totals["portions"])
+    cols[2].metric("Ingredients drawn", totals["ingredients_used"])
+    if data["query"]:
+        matched = ", ".join(f"{m['name']} ({m['score']:.2f})" for m in data["matched_ingredients"]) or "nothing"
+        how = "Qdrant semantic match" if data["semantic_search"] else "Name match (Qdrant unavailable)"
+        st.caption(f"{how} for “{data['query']}”: {matched}")
+    if not data["ingredients"]:
+        st.info("No inventory was drawn by orders for this selection.", icon=":material/info:")
+        return
+    left, right = st.columns((1.3, 1))
+    with left, st.container(border=True):
+        st.markdown("#### Most affected ingredients")
+        frame = pd.DataFrame(data["ingredients"])
+        frame["used"] = frame["used_today"].map("{:g}".format) + " " + frame["unit"]
+        frame["left"] = frame["remaining"].map("{:g}".format) + " " + frame["unit"]
+        st.dataframe(frame[["name", "used", "orders", "left", "depletion_pct", "status"]], hide_index=True,
+                     column_config={"name": "Ingredient", "used": "Used today", "orders": "Orders", "left": "Remaining",
+                                    "status": "Status", "depletion_pct": st.column_config.ProgressColumn(
+                                        "Share of stock used", min_value=0, max_value=100, format="%.0f%%")})
+    with right, st.container(border=True):
+        st.markdown("#### Dishes losing headroom")
+        if data["affected_dishes"]:
+            st.dataframe(pd.DataFrame(data["affected_dishes"])[
+                ["name", "portions_before", "portions_now", "lost_pct"]], hide_index=True, column_config={
+                "name": "Dish", "portions_before": "Could make (start)", "portions_now": "Can make now",
+                "lost_pct": st.column_config.ProgressColumn("Capacity used", min_value=0, max_value=100, format="%.0f%%")})
+        else:
+            st.caption("No dish lost capacity.")
+    with st.container(border=True):
+        st.markdown(f"#### What each order drew · {totals['orders_shown']} order(s)")
+        st.dataframe(pd.DataFrame([{
+            "Time (UTC)": o["time"], "Pickup": o["pickup_reference"], "Employee": o["user_id"], "Status": o["status"],
+            "Dishes": ", ".join(o["dishes"]),
+            "Ingredients used": ", ".join(f"{i['name']} {i['quantity']:g} {i['unit']}" for i in o["ingredients"]),
+        } for o in data["orders"]]), hide_index=True)
+        st.caption("Cancelled orders show net zero once their stock is returned.")
 
 
 def _stock_table(items: list[dict]) -> None:
@@ -247,15 +299,13 @@ def _update_stock(items: list[dict]) -> None:
                          | (edited["reorder_point"] != original["reorder_point"])]
         if st.button(f"Save {len(changed)} change(s)", type="primary", icon=":material/save:",
                      disabled=changed.empty, key="inv_save"):
-            csv = changed.drop(columns=["status"]).to_csv(index=False).encode()
             try:
-                result = api.request("POST", "/upload/inventory", files={"file": ("edits.csv", csv)},
-                                     data={"mode": "commit"})
+                for row in changed.itertuples():
+                    api.patch(f"/inventory/{row.ingredient_id}", {
+                        "quantity": float(row.quantity), "reorder_point": float(row.reorder_point),
+                        "note": "Edited on dashboard"})
             except api.ApiError as error:
                 st.error(str(error))
-                return
-            if result["errors"]:
-                st.error("; ".join(result["errors"][:5]))
                 return
             st.session_state["gt_flash"] = f"Updated {result['updated']} ingredient(s)"
             st.rerun()
@@ -322,11 +372,22 @@ def _risk_panel() -> None:
 
 def _ingredient_detail(item: dict) -> None:
     with st.container(border=True):
-        top = st.columns((3, 1, 1), vertical_alignment="center")
+        top = st.columns((3, 1, 1, 1), vertical_alignment="center")
         top[0].markdown(f"#### {item['name']} {STATUS_BADGE[item['status']]}")
         if top[1].button("Replenish", type="primary", icon=":material/add_box:", width="stretch",
                          key="detail_replenish"):
             replenish_dialog(item)
+        with top[3].popover("Set stock", width="stretch"):
+            amount = st.number_input(f"On hand ({item['unit']})", min_value=0.0, value=float(item["quantity"]),
+                                     key="edit_quantity")
+            note = st.text_input("Reason", value="Stock count correction", max_chars=200, key="edit_quantity_note")
+            if st.button("Save quantity", type="primary", key="save_quantity"):
+                try:
+                    api.patch(f"/inventory/{item['ingredient_id']}", {"quantity": amount, "note": note})
+                    st.session_state["gt_flash"] = f"{item['name']}: {item['quantity']:g} → {amount:g} {item['unit']}"
+                    st.rerun()
+                except api.ApiError as error:
+                    st.error(str(error))
         with top[2].popover("Edit threshold", width="stretch"):
             threshold = st.number_input("Reorder point", min_value=0.0, value=float(item["reorder_point"]),
                                         key="edit_threshold")
@@ -414,9 +475,44 @@ def render_menu_management() -> None:
                     st.error(str(error))
 
 
+def _model_panel() -> None:
+    status = api.load("/forecast/model")
+    if status is None:
+        return
+    with st.container(border=True):
+        top = st.columns((3, 1), vertical_alignment="center")
+        top[0].markdown("#### Prediction models")
+        if top[1].button("Retrain models", icon=":material/model_training:", width="stretch", key="retrain"):
+            try:
+                with st.spinner("Training on order history…"):
+                    status = api.post("/forecast/model/train")
+                st.session_state.pop("gt_forecast", None)
+                st.toast("Models retrained", icon=":material/check_circle:")
+            except api.ApiError as error:
+                st.warning(str(error), icon=":material/info:")
+        meta = status["metadata"]
+        if not meta:
+            st.caption("No trained models yet. Forecasts use the same-weekday baseline. Retrain once order history exists.")
+            return
+        cols = st.columns(2)
+        for col, (name, label, unit) in zip(cols, (("customer_demand", "Customer demand", "customers"),
+                                                     ("dish_demand", "Dish demand", "portions"))):
+            m = meta[name]
+            active = name in status["active_models"]
+            col.metric(f"{label} · MAE", f"{m['mae']:.3f} {unit}",
+                       f"{m['mae'] - m['baseline_mae']:+.3f} vs baseline", delta_color="inverse",
+                       help=f"WAPE {m['wape']}% (baseline {m['baseline_wape']}%) on {m['test_rows']} held-out rows "
+                            f"from {m['test_from']}")
+            col.caption(":green-badge[In use]" if active else ":orange-badge[Baseline in use — model did not beat it]")
+        demo = f" · :orange[{meta['demo_order_share']:.0f}% demo orders]" if meta["demo_order_share"] else ""
+        st.caption(f"{meta['model_version']} · trained {meta['trained_at'][:16].replace('T', ' ')} UTC on "
+                   f"{meta['orders_used']} orders ({meta['history_from']} → {meta['history_to']}){demo}")
+
+
 def render_forecasting() -> None:
     st.caption("Forecasting")
     st.title("Demand and preparation planning")
+    _model_panel()
     with st.form("forecast", border=True):
         cols = st.columns(3)
         target = cols[0].date_input("Forecast date", value=date.today() + timedelta(days=1))
@@ -438,7 +534,7 @@ def render_forecasting() -> None:
             st.info("Run a forecast to plan preparation and spot ingredient shortfalls.", icon=":material/info:")
             return
     st.markdown(f"#### Forecast for {forecast['date']} · {(forecast['meal_period'] or 'all periods').title()}")
-    st.caption(forecast["note"])
+    st.caption(f"Method: {forecast['method'].replace('_', ' ')} · {forecast['note']}")
     cols = st.columns(4)
     cols[0].metric("Expected customers", forecast["expected_customers"])
     cols[1].metric("Projected order value", money(forecast["projected_order_value"]))

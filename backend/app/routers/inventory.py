@@ -21,11 +21,15 @@ class IngredientRequest(BaseModel):
     quantity: float = Field(ge=0)
     unit: str = Field(min_length=1, max_length=12)
     reorder_point: float = Field(ge=0)
+    category: str = Field(default="", max_length=60)
 
 
 class IngredientUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=80)
+    category: str | None = Field(default=None, max_length=60)
     reorder_point: float | None = Field(default=None, ge=0)
+    quantity: float | None = Field(default=None, ge=0)
+    note: str = Field(default="Manual stock adjustment", max_length=200)
 
 
 class ReplenishmentRequest(BaseModel):
@@ -67,17 +71,20 @@ def create_ingredient(payload: IngredientRequest, manager: dict = Depends(requir
 
 
 @router.patch("/inventory/{ingredient_id}")
-def update_ingredient(ingredient_id: str, payload: IngredientUpdate, _: dict = Depends(require_manager),
+def update_ingredient(ingredient_id: str, payload: IngredientUpdate, manager: dict = Depends(require_manager),
                       db: Any = Depends(get_db)) -> dict:
-    changes = payload.model_dump(exclude_none=True)
+    changes = payload.model_dump(exclude_none=True, exclude={"note"})
     if not changes:
         raise HTTPException(status_code=400, detail="Nothing to update")
-    item = db.ingredients.find_one_and_update(
-        {"ingredient_id": ingredient_id}, {"$set": {**changes, "updated_at": now_utc()}},
-        return_document=ReturnDocument.AFTER)
-    if not item:
+    previous = db.ingredients.find_one_and_update(
+        {"ingredient_id": ingredient_id}, {"$set": {**changes, "updated_at": now_utc()}})
+    if not previous:
         raise HTTPException(status_code=404, detail="Ingredient not found")
-    return {"success": True, "data": with_status(item)}
+    delta = changes.get("quantity", previous["quantity"]) - float(previous["quantity"])
+    if delta:
+        record_movement(db, ingredient_id, "manual_adjustment", delta, manager["user_id"], note=payload.note)
+    return {"success": True, "previous_quantity": previous["quantity"],
+            "data": with_status(db.ingredients.find_one({"ingredient_id": ingredient_id}))}
 
 
 @router.get("/inventory/alerts")

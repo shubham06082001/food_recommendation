@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 
 from ..core.common import current_user
 from ..core.database import get_db
-from ..core.recommender import recommend
+from ..core.recommender import meal_plan, recommend
 
 router = APIRouter()
 
@@ -21,3 +21,12 @@ class RecommendationRequest(BaseModel):
 def recommendations(payload: RecommendationRequest, user: dict = Depends(current_user), db: Any = Depends(get_db)) -> dict:
     """Computed live from menu, stock, profile, history and the query; never persisted."""
     return recommend(db, user, payload.query, payload.meal_period, payload.limit, payload.exclude_dish_ids)
+
+
+class MealPlanRequest(BaseModel):
+    query: str = Field(default="", max_length=200)
+
+
+@router.post("/recommendations/meal-plan")
+def day_plan(payload: MealPlanRequest, user: dict = Depends(current_user), db: Any = Depends(get_db)) -> dict:
+    return meal_plan(db, user, payload.query)

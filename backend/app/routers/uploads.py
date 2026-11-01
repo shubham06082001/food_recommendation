@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 
 from ..core.common import MEAL_PERIODS, now_utc, nutrition_tags, record_movement, require_manager
 from ..core.database import get_db
+from ..core.enrich import enrich_in_background
 
 router = APIRouter()
 
@@ -72,6 +73,8 @@ async def upload_inventory(
             seen.add(ingredient_id)
             rows.append({"ingredient_id": ingredient_id, "name": text(raw["name"]), "quantity": quantity,
                          "unit": text(raw["unit"]), "reorder_point": reorder})
+            if text(raw.get("category")):
+                rows[-1]["category"] = text(raw.get("category"))[:60]
     if errors or mode == "validate":
         return {"success": not errors, "mode": mode, "valid_rows": len(rows), "errors": errors[:50]}
 
@@ -122,12 +125,18 @@ async def upload_recipes(
                 "nutrition": nutrition, "nutrition_tags": nutrition_tags(**nutrition),
                 "evidence_status": text(raw.get("evidence_status")).lower() or "confirmed",
             }
+            image = text(raw.get("image_url"))
+            if image.startswith("https://"):
+                dishes[dish_id]["image_url"] = image
         lines[dish_id].append({"ingredient_id": ingredient_id, "quantity": quantity,
                                "unit": known[ingredient_id].get("unit")})
     if errors or mode == "validate":
         return {"success": not errors, "mode": mode, "dishes": len(dishes), "errors": errors[:50]}
 
     for dish_id, dish in dishes.items():
+        # Nutrients are re-derived from the (possibly new) catalog code by the background enrichment.
         db.recipes.update_one({"dish_id": dish_id},
-                              {"$set": {**dish, "ingredients": lines[dish_id], "updated_at": now_utc()}}, upsert=True)
+                              {"$set": {**dish, "ingredients": lines[dish_id], "updated_at": now_utc()},
+                               "$unset": {"nutrient_profile": ""}}, upsert=True)
+    enrich_in_background(db)
     return {"success": True, "mode": mode, "updated": len(dishes), "errors": []}

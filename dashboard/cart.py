@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import html
+
 import streamlit as st
 
 from dashboard import api
@@ -21,35 +23,41 @@ def _checkout() -> None:
     st.session_state["gt_cart_open"] = False
     # Stock changed, so recommendations may list dishes that are no longer available.
     api.recommendations.clear()
+    api.meal_plan.clear()
     st.session_state["gt_last_order"] = order
     st.session_state.pop("gt_checkout_error", None)
     go_to("My orders")
 
 
 def render_cart_panel() -> None:
+    """Rendered inside the sidebar, directly under the Cart entry."""
     if st.session_state["role"] != "employee" or not st.session_state["gt_cart_open"]:
         return
-    with st.sidebar, st.container(key="gt_cart"):
-        header = st.columns((2, 1.3), vertical_alignment="center")
-        header[0].markdown("#### Your cart")
-        header[1].button("Close", key="gt_cart_close", icon=":material/close:", on_click=toggle_cart)
+    with st.container(key="gt_cart_panel"):
+        header = st.columns((4, 1), vertical_alignment="center")
+        header[0].markdown('<p class="gt-kicker">Order</p><h4 class="gt-cart-title">Your cart</h4>', unsafe_allow_html=True)
+        header[1].button(":material/close:", key="gt_cart_close", help="Close cart", on_click=toggle_cart)
         cart = st.session_state["gt_cart"]
         if not cart:
-            st.caption("Your cart is empty. Add a meal from the menu.")
+            st.caption("Your cart is empty. Add a meal to get started.")
             return
         total = 0
         for dish_id, line in cart.items():
             line_total = line["price"] * line["quantity"]
             total += line_total
-            st.markdown(f"**{line['name']}** · ₹{line_total:,.0f}")
-            stepper = st.columns((1, 1, 1, 2.2), vertical_alignment="center")
-            stepper[0].button("−", key=f"minus_{dish_id}", on_click=change_quantity, args=(dish_id, -1))
+            st.markdown(f"<div class='gt-cart-line'><span>{html.escape(line['name'])}</span>"
+                        f"<b>₹{line_total:,.0f}</b></div>", unsafe_allow_html=True)
+            stepper = st.columns((1, 1, 1, 1), vertical_alignment="center")
+            stepper[0].button(":material/remove:", key=f"minus_{dish_id}", help="One less",
+                              on_click=change_quantity, args=(dish_id, -1))
             stepper[1].markdown(f"<div class='gt-qty'>{line['quantity']}</div>", unsafe_allow_html=True)
-            stepper[2].button("+", key=f"plus_{dish_id}", on_click=change_quantity, args=(dish_id, 1))
-            stepper[3].button("Remove", key=f"remove_{dish_id}", on_click=remove_from_cart, args=(dish_id,))
+            stepper[2].button(":material/add:", key=f"plus_{dish_id}", help="One more",
+                              on_click=change_quantity, args=(dish_id, 1))
+            stepper[3].button(":material/delete:", key=f"remove_{dish_id}", help="Remove",
+                              on_click=remove_from_cart, args=(dish_id,))
         st.markdown(f"<div class='gt-cart-total'><span>Total</span><b>₹{total:,.0f}</b></div>", unsafe_allow_html=True)
         if error := st.session_state.get("gt_checkout_error"):
             st.error(error, icon=":material/error:")
-        st.button("Place order – demo payment", type="primary", width="stretch", on_click=_checkout,
+        st.button("Place order", type="primary", width="stretch", on_click=_checkout, key="gt_place_order",
                   icon=":material/check_circle:")
-        st.caption("No payment is taken. Orders are marked as demo-paid.")
+        st.caption("Demo payment: no money is taken.")

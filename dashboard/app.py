@@ -12,13 +12,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import streamlit as st
 
 from dashboard import api
-from dashboard.cart import render_cart_panel
 from dashboard.navbar import render_topbar
 from dashboard.sidebar import render_sidebar
 from dashboard.state import initialize_state
 from dashboard.theme import apply_canva_theme
 from dashboard.views import render_view
-from dashboard.views.login import render_login, restore_session
+from dashboard.views.login import keep_alive, render_login, restore_session, write_cookie
 
 
 @st.fragment(run_every=5)
@@ -44,10 +43,12 @@ def main() -> None:
     if not st.session_state["user_id"]:
         restore_session()
     if not st.session_state["user_id"]:
+        write_cookie()
         render_login()
         return
+    keep_alive()
+    write_cookie()
     render_sidebar()
-    render_cart_panel()
     render_topbar()
     render_view()
 

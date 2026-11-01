@@ -1,12 +1,16 @@
+from datetime import timedelta
+from secrets import token_urlsafe
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from ..core.common import current_user, now_utc, require_self_or_manager, serialize
 from ..core.database import get_db
 
 router = APIRouter()
+
+SESSION_MINUTES = 30
 
 Diet = Literal["vegetarian", "vegan", "eggetarian", "non_vegetarian", "no_preference"]
 Goal = Literal["high_protein", "high_fibre", "lower_sodium", "balanced"]
@@ -25,6 +29,13 @@ class PreferencesRequest(BaseModel):
     consented: bool
 
 
+def _profile(user: dict) -> dict:
+    role = user.get("role", "employee")
+    return {"user_id": user["user_id"], "name": user.get("name", user["user_id"]), "role": role,
+            "profile_complete": bool(user.get("profile_complete")),
+            "next_screen": "manager_home" if role == "manager" else "employee_home"}
+
+
 @router.post("/auth/login")
 def login(payload: LoginRequest, db: Any = Depends(get_db)) -> dict:
     user_id = payload.user_id.strip().upper()
@@ -34,10 +45,29 @@ def login(payload: LoginRequest, db: Any = Depends(get_db)) -> dict:
         user = {"user_id": user_id, "name": f"Employee {user_id}", "role": "employee",
                 "preferences": {}, "profile_complete": False, "created_at": now_utc()}
         db.users.insert_one(user)
-    role = user.get("role", "employee")
-    return {"user_id": user_id, "name": user.get("name", user_id), "role": role,
-            "profile_complete": bool(user.get("profile_complete")),
-            "next_screen": "manager_home" if role == "manager" else "employee_home"}
+    token = token_urlsafe(32)
+    expires = now_utc() + timedelta(minutes=SESSION_MINUTES)
+    db.sessions.insert_one({"token": token, "user_id": user_id, "created_at": now_utc(), "expires_at": expires})
+    return {**_profile(user), "session_token": token, "expires_at": expires.isoformat(),
+            "session_minutes": SESSION_MINUTES}
+
+
+@router.get("/auth/session")
+def refresh_session(x_session_token: str = Header(min_length=20, max_length=100), db: Any = Depends(get_db)) -> dict:
+    """Validate a browser session and slide its expiry 30 minutes forward (activity keeps it alive)."""
+    expires = now_utc() + timedelta(minutes=SESSION_MINUTES)
+    session = db.sessions.find_one_and_update({"token": x_session_token, "expires_at": {"$gt": now_utc()}},
+                                              {"$set": {"expires_at": expires, "last_seen": now_utc()}})
+    user = db.users.find_one({"user_id": session["user_id"]}) if session else None
+    if not user:
+        raise HTTPException(status_code=401, detail="Session expired; please log in again")
+    return {**_profile(user), "expires_at": expires.isoformat(), "session_minutes": SESSION_MINUTES}
+
+
+@router.post("/auth/logout")
+def logout(x_session_token: str = Header(default=""), db: Any = Depends(get_db)) -> dict:
+    db.sessions.delete_one({"token": x_session_token})
+    return {"success": True}
 
 
 @router.get("/users/{user_id}")

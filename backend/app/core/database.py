@@ -26,6 +26,9 @@ def ensure_indexes(db: Any) -> None:
     db.orders.create_index([("status", 1), ("date", -1)])
     db.feedback.create_index("order_id", unique=True)
     db.feedback.create_index("user_id")
+    db.sessions.create_index("token", unique=True)
+    db.sessions.create_index("expires_at", expireAfterSeconds=0)
+    db.inventory_movements.create_index("order_id")
     db.forecasts.create_index([("date", 1), ("created_at", -1)])
 
 

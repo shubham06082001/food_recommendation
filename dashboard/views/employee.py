@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 from datetime import date, datetime
 
 import pandas as pd
@@ -10,7 +11,7 @@ import streamlit as st
 from dashboard import api
 from dashboard.config import DISCLAIMER, MEAL_PERIODS, TAG_LABELS
 from dashboard.state import add_to_cart, go_to
-from dashboard.utils import money, tag_badges
+from dashboard.utils import money
 
 STATUS_STEPS = ["confirmed", "preparing", "ready", "collected"]
 
@@ -28,20 +29,62 @@ def _period_now() -> str:
     return "breakfast" if hour < 11 else "lunch" if hour < 15 else "snacks" if hour < 18 else "dinner"
 
 
+def _amounts(dish: dict) -> dict[str, float]:
+    profile = dish.get("nutrient_profile") or {}
+    values = {row["key"]: row["amount"] for row in profile.get("macros", [])}
+    return {**values, **{k: v for k, v in dish.get("nutrition", {}).items() if v}}
+
+
+def _card_html(dish: dict, score: int | None) -> str:
+    name = html.escape(dish["name"])
+    image = dish.get("image_url") or ""
+    top = (f'<img class="gt-card-img" src="{html.escape(image)}" alt="{name}" loading="lazy">'
+           if image.startswith("https://") else '<div class="gt-card-noimg">🍽️</div>')
+    if image.startswith("https://") and dish.get("image_credit", "").startswith("https://"):
+        top += (f'<div class="gt-credit"><a href="{html.escape(dish["image_credit"])}" target="_blank" '
+                f'rel="noopener">Photo: Wikimedia Commons</a></div>')
+    values = _amounts(dish)
+    macros = "".join(f"<div><b>{values.get(k, 0):.0f}{unit}</b><small>{label}</small></div>" for k, unit, label in (
+        ("protein_g", "g", "protein"), ("carb_g", "g", "carbs"), ("fat_g", "g", "fat"), ("energy_kcal", "", "kcal")))
+    portions = dish.get("maximum_portions")
+    status = "Unavailable" if not dish.get("available", True) else (
+        f"Only {portions} left" if portions is not None and portions < 5 else "Available now")
+    allergens = dish.get("declared_allergens") or []
+    chips = "".join(f'<span class="gt-chip warn">{html.escape(a.title())}</span>' for a in allergens) or \
+        '<span class="gt-chip">No declared allergens</span>'
+    chips += "".join(f'<span class="gt-chip">{TAG_LABELS[t]}</span>' for t in dish.get("nutrition_tags", [])
+                     if t in TAG_LABELS)
+    badge = f'<span class="gt-score">{score} match</span>' if score else ""
+    return (f'{top}<div class="gt-card-head"><span class="gt-card-name">{name}</span>{badge}</div>'
+            f'<div class="gt-card-sub">{money(dish["price"])} · {status} · '
+            f'{html.escape(dish.get("diet", "").replace("_", "-"))} · {values.get("fibre_g", 0):.0f} g fibre</div>'
+            f'<div class="gt-macros">{macros}</div><div class="gt-chips">{chips}</div>')
+
+
+def _nutrient_frame(rows: list[dict]) -> pd.DataFrame:
+    return pd.DataFrame([{"Nutrient": r["label"], "Amount": f"{r['amount']:g} {r['unit']}",
+                          "% of a day": min(r["daily_pct"], 100.0)} for r in rows])
+
+
+def nutrition_detail(dish: dict) -> None:
+    profile = dish.get("nutrient_profile")
+    st.markdown(f"**{dish['name']}**")
+    if not profile:
+        nutrition = dish.get("nutrition", {})
+        st.caption("Detailed nutrients are not linked for this dish yet (add an INDB catalog code).")
+        st.write(", ".join(f"{k.replace('_', ' ')}: {v:g}" for k, v in nutrition.items()))
+        return
+    st.caption(f"{profile['basis'].capitalize()} · source {profile['source']}. % of a day uses approximate adult "
+               "reference values; guidance only.")
+    config = {"% of a day": st.column_config.ProgressColumn("% of a day", min_value=0, max_value=100, format="%.0f%%")}
+    macro_tab, micro_tab = st.tabs(["Macronutrients", "Vitamins & minerals"])
+    macro_tab.dataframe(_nutrient_frame(profile["macros"]), hide_index=True, column_config=config)
+    micro_tab.dataframe(_nutrient_frame(profile["micros"]), hide_index=True, column_config=config)
+
+
 def dish_card(dish: dict, key: str, reasons: list[str] | None = None) -> None:
     with st.container(border=True):
-        top = st.columns((3, 1), vertical_alignment="center")
-        top[0].markdown(f"**{dish['name']}**")
-        top[1].markdown(f"**{money(dish['price'])}**")
-        if reasons is not None and dish.get("match_percent"):
-            st.caption(f"{dish['match_percent']}% match for you")
-        nutrition = dish.get("nutrition", {})
-        st.caption(f"{nutrition.get('protein_g', 0):.0f} g protein · {nutrition.get('fibre_g', 0):.0f} g fibre · "
-                   f"{nutrition.get('energy_kcal', 0):.0f} kcal · {dish.get('diet', '').replace('_', '-')}")
-        if dish.get("nutrition_tags"):
-            st.markdown(tag_badges(dish["nutrition_tags"]))
-        allergens = ", ".join(dish.get("declared_allergens", [])) or "none declared"
-        st.caption(f"Declared allergens: {allergens}")
+        st.html(_card_html(dish, dish.get("match_percent") if reasons is not None else None))
         for reason in reasons or []:
             st.caption(f":material/check: {reason}")
         available = dish.get("available", True)
@@ -53,6 +96,8 @@ def dish_card(dish: dict, key: str, reasons: list[str] | None = None) -> None:
         st.button("Add to cart", key=key, icon=":material/add_shopping_cart:", type="primary",
                   disabled=not (available and eligible), on_click=add_to_cart,
                   args=({**dish, "from_recommendation": reasons is not None},), width="stretch")
+        with st.popover("Macro & micronutrients", key=f"nut_{key}", icon=":material/nutrition:", width="stretch"):
+            nutrition_detail(dish)
 
 
 def _status_line(order: dict) -> None:
@@ -149,12 +194,25 @@ def _understood(intent: dict) -> list[str]:
 def render_menu() -> None:
     st.caption("Personalised food discovery")
     st.title("Today's menu")
+    mode = st.segmented_control("View", ["For you", "Plan my day", "Full menu"], default="For you",
+                                key="gt_menu_mode") or "For you"
+    if mode == "Plan my day":
+        _render_day_plan()
+        st.caption(DISCLAIMER)
+        return
     period = st.segmented_control("Meal period", MEAL_PERIODS, default=_period_now(), format_func=str.title,
                                   key="gt_period_select") or _period_now()
+    if mode == "Full menu":
+        _render_full_menu(period)
+    else:
+        _render_for_you(period)
+    st.caption(DISCLAIMER)
 
+
+def _render_for_you(period: str) -> None:
     with st.form("rec_query", border=False):
         cols = st.columns((4, 1), vertical_alignment="bottom")
-        query = cols[0].text_input("What would you like?", placeholder="e.g. light high-protein lunch",
+        query = cols[0].text_input("What would you like?", placeholder="e.g. light high-protein lunch under 150, no milk",
                                    max_chars=200)
         cols[1].form_submit_button("Search", icon=":material/search:", width="stretch")
 
@@ -184,6 +242,8 @@ def render_menu() -> None:
         else:
             st.info("No dishes match your preferences and search for this meal period.", icon=":material/info:")
 
+
+def _render_full_menu(period: str) -> None:
     menu = api.load("/menu", meal_period=period, user_id=st.session_state["user_id"])
     if menu is None:
         return
@@ -194,7 +254,53 @@ def render_menu() -> None:
     for index, dish in enumerate(sorted(menu["items"], key=lambda d: (not d["available"], d["name"]))):
         with cols[index % 3]:
             dish_card(dish, f"menu_{period}_{dish['dish_id']}")
-    st.caption(DISCLAIMER)
+
+
+def _add_plan(meals: list[dict]) -> None:
+    for meal in meals:
+        add_to_cart({**meal, "from_recommendation": True})
+
+
+def _render_day_plan() -> None:
+    with st.form("plan_query", border=False):
+        cols = st.columns((4, 1), vertical_alignment="bottom")
+        query = cols[0].text_input("Shape the plan (optional)", placeholder="e.g. high protein, under 150, no milk",
+                                   max_chars=200)
+        cols[1].form_submit_button("Build plan", icon=":material/auto_awesome:", width="stretch")
+    try:
+        plan = api.meal_plan(st.session_state["user_id"], query.strip())
+    except api.ApiError as error:
+        st.error(str(error), icon=":material/error:")
+        return
+    meals = plan["meals"]
+    if not meals:
+        st.info("No dishes fit your preferences today.", icon=":material/info:")
+        return
+    st.caption("One live pick per meal, chosen by the recommendation engine around your diet, allergens and goals.")
+    cols = st.columns(len(meals))
+    for col, meal in zip(cols, meals):
+        with col:
+            st.markdown(f"**{meal['meal_period'].title()}**")
+            dish_card(meal, f"plan_{meal['meal_period']}_{meal['dish_id']}", meal["reasons"][:2])
+    totals = plan["totals"]
+    with st.container(border=True):
+        head = st.columns((3, 1), vertical_alignment="center")
+        head[0].markdown(f"#### Your day in nutrients · {money(totals['price'])}")
+        head[1].button("Add whole plan", icon=":material/add_shopping_cart:", type="primary", width="stretch",
+                       on_click=_add_plan, args=(meals,))
+        macros = {r["key"]: r for r in totals["macros"]}
+        metrics = st.columns(5)
+        for col, key in zip(metrics, ("energy_kcal", "protein_g", "carb_g", "fat_g", "fibre_g")):
+            row = macros[key]
+            col.metric(row["label"], f"{row['amount']:.0f} {row['unit']}", f"{row['daily_pct']:.0f}% of a day",
+                       delta_color="off")
+        config = {"% of a day": st.column_config.ProgressColumn("% of a day", min_value=0, max_value=100,
+                                                                format="%.0f%%")}
+        left, right = st.columns(2)
+        left.dataframe(_nutrient_frame(totals["macros"]), hide_index=True, column_config=config)
+        right.dataframe(_nutrient_frame(totals["micros"]), hide_index=True, column_config=config)
+        st.caption("Totals are per cafeteria portion from the Indian Nutrient Databank; reference values are "
+                   "approximate adult daily needs and not medical advice.")
 
 
 def _reorder(order: dict) -> None:

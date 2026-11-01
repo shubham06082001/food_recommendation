@@ -94,12 +94,12 @@ check("wellness score rises after order", at, score and int(score.split()[0]) > 
 nav(at, "Profile")
 check("employee profile reload", at)
 
-reloaded = AppTest.from_file("app.py", default_timeout=120)
-reloaded.query_params["user"] = employee
-reloaded.query_params["view"] = "My wellness"
-reloaded.run()
-check("browser reload keeps user signed in on same page", reloaded,
-      reloaded.session_state["user_id"] == employee and reloaded.session_state["gt_view"] == "My wellness")
+check("session token kept for the browser cookie", at, len(at.session_state["gt_session"]) > 30)
+for mode in ("Plan my day", "Full menu"):
+    nav(at, "Menu")
+    at.segmented_control(key="gt_menu_mode").set_value(mode).run()
+    check(f"menu view: {mode}", at)
+at.segmented_control(key="gt_menu_mode").set_value("For you").run()
 
 at.button(key="sign_out").click().run()
 check("sign out", at, at.session_state["user_id"] is None)

@@ -11,6 +11,8 @@ from datetime import date, timedelta
 import pandas as pd
 
 assert os.getenv("ECOS_MONGODB_DB", "").endswith("_test"), "Set ECOS_MONGODB_DB=ECOS_test to protect real data"
+# Train into a throwaway folder so test runs never overwrite real model artifacts.
+os.environ.setdefault("ECOS_ML_ARTIFACTS", __import__("tempfile").mkdtemp(prefix="ecos_ml_"))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -50,6 +52,31 @@ with TestClient(app) as client:
     check("login manager", r.json()["role"] == "manager", r.text)
     r = client.post("/api/v1/auth/login", json={"user_id": "bad id!"})
     check("login rejects invalid id", r.status_code == 422, r.status_code)
+
+    # Browser sessions: 30-minute sliding expiry, revoked on logout
+    login = client.post("/api/v1/auth/login", json={"user_id": "EMP001"}).json()
+    token = login.get("session_token", "")
+    check("login issues session token", len(token) > 30 and login["session_minutes"] == 30, login)
+    first = db.sessions.find_one({"token": token})["expires_at"]
+    r = client.get("/api/v1/auth/session", headers={"X-Session-Token": token})
+    check("session restores user", r.status_code == 200 and r.json()["user_id"] == "EMP001", r.text)
+    check("session expiry slides", db.sessions.find_one({"token": token})["expires_at"] >= first)
+    check("unknown session rejected", client.get("/api/v1/auth/session",
+                                                 headers={"X-Session-Token": "x" * 40}).status_code == 401)
+    client.post("/api/v1/auth/logout", headers={"X-Session-Token": token})
+    check("logout revokes session", client.get("/api/v1/auth/session",
+                                               headers={"X-Session-Token": token}).status_code == 401)
+
+    # Enrichment: INDB macro/micro profile from Qdrant + Wikimedia image (both optional services)
+    from backend.app.core import enrich
+    with enrich._lock:  # wait for the startup background run
+        pass
+    enrich.enrich_recipes(db)
+    matar = db.recipes.find_one({"dish_id": "DISH_MATAR_PANEER"})
+    profile = matar.get("nutrient_profile") or {}
+    print("     enrichment: micros=%d image=%s" % (len(profile.get("micros", [])), matar.get("image_url", "")[:70]))
+    check("nutrient profile matches recipe portion", not profile or abs(
+        next(m["amount"] for m in profile["macros"] if m["key"] == "energy_kcal") - 374) < 1, profile.get("macros"))
 
     # Authorization
     check("users/{id} needs login", client.get("/api/v1/users/EMP001").status_code == 401)
@@ -101,6 +128,15 @@ with TestClient(app) as client:
           {i["dish_id"] for i in rec["items"]}, r.text[:300])
     r = client.post("/api/v1/recommendations", json={"query": "peanut free breakfast", "limit": 5}, headers=h("EMP001"))
     check("query can set the meal period", r.json()["meal_period"] == "breakfast", r.text[:300])
+    check("recommendations carry nutrients and images", all("nutrient_profile" in i and "image_url" in i
+                                                            for i in r.json()["items"]), r.text[:300])
+    r = client.post("/api/v1/recommendations/meal-plan", json={"query": "high protein"}, headers=h("EMP001"))
+    plan = r.json()
+    dishes = [m["dish_id"] for m in plan.get("meals", [])]
+    check("meal plan: one veg pick per period, no repeats", r.status_code == 200 and len(dishes) >= 3
+          and len(set(dishes)) == len(dishes) and all(m["diet"] == "veg" for m in plan["meals"]), r.text[:300])
+    check("meal plan totals", plan["totals"]["price"] == sum(m["price"] for m in plan["meals"])
+          and len(plan["totals"]["micros"]) == 16, plan.get("totals"))
 
     # Order -> stock deduction
     paneer_before = db.ingredients.find_one({"ingredient_id": "ING_PANEER"})["quantity"]
@@ -146,6 +182,28 @@ with TestClient(app) as client:
     r = client.post("/api/v1/inventory", json={"ingredient_id": "ing_ghee", "name": "Ghee", "quantity": 500,
                                                "unit": "g", "reorder_point": 100}, headers=h("MGR001"))
     check("add ingredient", r.status_code == 201, r.text)
+    r = client.patch("/api/v1/inventory/ING_PEAS", json={"quantity": 4000, "note": "count"}, headers=h("MGR001"))
+    check("set stock quantity", r.status_code == 200 and r.json()["data"]["quantity"] == 4000, r.text)
+    moves = client.get("/api/v1/inventory/ING_PEAS/movements", headers=h("MGR001")).json()["data"]
+    check("quantity edit logged", moves[0]["type"] == "manual_adjustment" and moves[0]["quantity"] == 4000 - peas, moves[:1])
+    check("employee cannot edit stock", client.patch("/api/v1/inventory/ING_PEAS", json={"quantity": 1},
+                                                     headers=h("EMP001")).status_code == 403)
+
+    # Today's consumption per order
+    check("consumption needs manager", client.get("/api/v1/inventory/consumption", headers=h("EMP001")).status_code == 403)
+    r = client.get("/api/v1/inventory/consumption", headers=h("MGR001"))
+    use = r.json()
+    paneer_use = next((i for i in use.get("ingredients", []) if i["ingredient_id"] == "ING_PANEER"), {})
+    check("consumption totals paneer per order", r.status_code == 200 and paneer_use.get("used_today") == 900
+          and paneer_use.get("orders") == 2 and len(use["orders"]) == 2, r.text[:400])
+    check("consumption shows affected dishes", any(d["dish_id"] == "DISH_MATAR_PANEER" and d["portions_lost"] > 0
+                                                   for d in use["affected_dishes"]), use["affected_dishes"])
+    r = client.get("/api/v1/inventory/consumption", params={"query": "dairy"}, headers=h("MGR001"))
+    focus = r.json()
+    check("consumption focus search", r.status_code == 200 and "ING_PANEER" in
+          {m["ingredient_id"] for m in focus["matched_ingredients"]}, focus.get("matched_ingredients"))
+    print("     consumption focus (semantic=%s):" % focus["semantic_search"],
+          [(m["name"], m["score"]) for m in focus["matched_ingredients"]])
 
     # Order lifecycle
     for status in ("preparing", "ready", "collected"):
@@ -217,6 +275,8 @@ with TestClient(app) as client:
     # Forecast (no history then with history)
     r = client.post("/api/v1/forecast/run", json={"buffer_percent": 5}, headers=h("MGR001"))
     check("forecast no history", r.status_code == 200 and r.json()["method"] == "default_no_history", r.text[:300])
+    r = client.post("/api/v1/forecast/model/train", headers=h("MGR001"))
+    check("training refuses thin history (400)", r.status_code == 400, r.text[:200])
     from backend.app.core.seed import seed_demo_history
     seed_demo_history(db, weeks=4)
     r = client.post("/api/v1/forecast/run", json={"date": (date.today() + timedelta(days=7)).isoformat()},
@@ -225,6 +285,28 @@ with TestClient(app) as client:
     check("forecast with history", r.status_code == 200 and fc["dishes"], r.text[:300])
     print("     forecast method:", fc["method"], "customers:", fc["expected_customers"], "value:", fc["projected_order_value"])
     check("forecast latest", client.get("/api/v1/forecast/latest", headers=h("MGR001")).status_code == 200)
+
+    # Demand models: train, evaluate against baseline, serve
+    check("employee cannot retrain", client.post("/api/v1/forecast/model/train", headers=h("EMP001")).status_code == 403)
+    r = client.post("/api/v1/forecast/model/train", headers=h("MGR001"))
+    status = r.json()
+    check("train demand models", r.status_code == 200 and status["trained"], r.text[:300])
+    for name in ("customer_demand", "dish_demand"):
+        m = status["metadata"][name]
+        print(f"     {name}: MAE {m['mae']} (baseline {m['baseline_mae']}), WAPE {m['wape']}% "
+              f"(baseline {m['baseline_wape']}%), train/test {m['train_rows']}/{m['test_rows']}, in use: {m['beats_baseline']}")
+    check("model status endpoint", client.get("/api/v1/forecast/model", headers=h("MGR001")).json()["active_models"]
+          == status["active_models"])
+    weekday = date.today() + timedelta(days=1)
+    while weekday.weekday() >= 5:
+        weekday += timedelta(days=1)
+    r = client.post("/api/v1/forecast/run", json={"date": weekday.isoformat(), "meal_period": "lunch"}, headers=h("MGR001"))
+    fc = r.json()
+    expected_method = "random_forest" if status["active_models"] else "same_weekday_average"
+    check("forecast uses model only when it beats baseline", r.status_code == 200 and fc["method"] == expected_method
+          and fc["dishes"] and all(d["expected_orders"] >= 0 for d in fc["dishes"]), r.text[:300])
+    print("     model forecast:", fc["method"], "customers:", fc["expected_customers"],
+          "top:", sorted(((d["name"], d["expected_orders"]) for d in fc["dishes"]), key=lambda x: -x[1])[:3])
 
     # Dashboards
     r = client.get("/api/v1/dashboard/employee/EMP001", headers=h("EMP001"))

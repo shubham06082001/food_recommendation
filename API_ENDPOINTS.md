@@ -25,7 +25,7 @@ flowchart TB
         UP[User & Profile] --- MC[Menu & Catalog] --- OR[Ordering] --- IN[Inventory] --- RE[Recommendations]
         FO[Forecasting] --- AN[Analytics & KPIs] --- PR[Procurement] --- FB[Feedback & Behaviour] --- CP[AI Copilot]
     end
-    BE -- "read / write (PyMongo)" --> DB[("MongoDB<br/>users · ingredients · recipes · menus · orders<br/>inventory_movements · feedback · forecasts · recommendation_events")]
+    BE -- "read / write (PyMongo)" --> DB[("MongoDB<br/>users · ingredients · recipes · menus · orders<br/>inventory_movements · feedback · forecasts")]
     RE -. "optional semantic ranking" .-> Q[("Qdrant<br/>food_nutrients")]
 ```
 
@@ -61,7 +61,9 @@ Status: ✅ built and tested · 🟡 partial · ❌ not built.
 
 | Method | Path | Auth | Purpose | Dashboard screen |
 |---|---|---|---|---|
-| POST | `/auth/login` | public | Log in; unknown ID auto-creates an **employee** (managers are seeded only) | Login |
+| POST | `/auth/login` | public | Log in; unknown ID auto-creates an **employee** (managers are seeded only). Returns a `session_token` (30 min) | Login |
+| GET | `/auth/session` | header `X-Session-Token` | Restore a browser session after reload and slide its expiry another 30 min; 401 when expired | App start (cookie `ecos_session`) |
+| POST | `/auth/logout` | header `X-Session-Token` | Revoke the session | Sign out |
 | GET | `/users/{user_id}` | self/mgr | Read profile and preferences | Profile |
 | PUT | `/users/{user_id}/preferences` | employee (self) | Save diet, wellness goals, allergens, favourites (**consent required**) | Profile |
 | GET | `/users` | public | List users (`user_id, name, role, profile_complete` only) | — |
@@ -113,7 +115,7 @@ Nutrition tags (`high_protein`, `high_fibre`, `lower_sodium`, `balanced`) are **
 
 ```json
 // POST /orders
-{ "items": [{"dish_id": "DISH_MATAR_PANEER", "quantity": 2}], "recommendation_event_id": "REC-…" }
+{ "items": [{"dish_id": "DISH_MATAR_PANEER", "quantity": 2}], "recommended_dish_ids": ["DISH_MATAR_PANEER"] }
 // 201 → { "success": true, "order_id": "ORD-…", "pickup_reference": "C482", "total": 280, "status": "confirmed" }
 // 409 → { "detail": "Not enough Paneer in stock for this order" }
 ```
@@ -134,12 +136,14 @@ Nutrition tags (`high_protein`, `high_fibre`, `lower_sodium`, `balanced`) are **
 |---|---|---|---|---|
 | GET | `/inventory` | manager | Stock + status `HEALTHY / CRITICAL / STOCKOUT` (`?status=`) | Inventory |
 | POST | `/inventory` | manager | Add one ingredient | Inventory → Add |
-| PATCH | `/inventory/{ingredient_id}` | manager | Edit name / reorder point (threshold) | Inventory → Edit threshold |
+| PATCH | `/inventory/{ingredient_id}` | manager | Edit name, category, reorder point or **on-hand quantity** (logged as `manual_adjustment`) | Inventory → Edit stock, Set stock |
+| GET | `/inventory/consumption` | manager | What each order drew from stock for a day, most-depleted ingredients, dishes losing capacity; `?query=dairy` focuses via **Qdrant** semantic search over ingredients | Inventory → Today's consumption |
 | POST | `/upload/inventory` | manager | Excel/CSV stock load (`ingredient_id, name, quantity, unit, reorder_point`) | Inventory → Upload |
 | GET | `/inventory/alerts` | manager | Items at/below reorder point + affected-dish count + suggested reorder | Today, Inventory |
+| GET | `/inventory/risk` | manager | Dishes at risk today (stockout / over-demand / low stock), revenue at risk, Qdrant-ranked swaps, slow movers (waste) | Inventory → Risk & impact |
 | POST | `/inventory/{ingredient_id}/replenish` | manager | Receive stock `{"quantity": 5000, "note": "…"}` | Replenish dialog |
 | GET | `/inventory/{ingredient_id}/affected-dishes` | manager | Dishes using it + portions still possible | Inventory detail |
-| GET | `/inventory/{ingredient_id}/movements` | manager | Ledger (`opening_stock, stock_upload, order_consumption, order_cancelled, replenishment`) | Inventory detail |
+| GET | `/inventory/{ingredient_id}/movements` | manager | Ledger (`opening_stock, stock_upload, manual_adjustment, order_consumption, order_cancelled, replenishment`) | Inventory detail |
 
 | Image feature | Status | Delivered by |
 |---|---|---|
@@ -154,23 +158,26 @@ Nutrition tags (`high_protein`, `high_fibre`, `lower_sodium`, `balanced`) are **
 
 | Method | Path | Auth | Purpose | Dashboard screen |
 |---|---|---|---|---|
-| POST | `/recommendations` | user | Ranked, eligible, **in-stock** dishes with reasons | Employee Home, Menu |
+| POST | `/recommendations` | user | Ranked, eligible, **in-stock** dishes with reasons, photo and macro/micronutrient profile | Employee Home, Menu |
+| POST | `/recommendations/meal-plan` | user | One live pick per meal period (no repeats) + day totals vs daily reference | Menu → Plan my day |
+
+**Recipe enrichment (stored on `recipes`).** On startup and after recipe upload, a background job fills `nutrient_profile` (16 vitamins/minerals + 8 macros per cafeteria portion, from the INDB-based Qdrant `food_nutrients` collection via `catalog_code`) and `image_url`/`image_credit` (lead photo of the matching Wikipedia article, hosted on Wikimedia Commons). Recipe uploads may also set `image_url` directly.
 
 ```json
 // POST /recommendations
-{ "meal_period": "lunch", "query": "high protein vegetarian", "limit": 5 }
-// → { "recommendation_event_id": "REC-…", "semantic_ranking": true,
-//     "items": [{ "dish_id": "…", "semantic_score": 0.61, "goal_matches": 1, "reasons": ["Matches your high-protein goal", …] }] }
+{ "meal_period": "lunch", "query": "light high protein under 150 without paneer", "limit": 6, "exclude_dish_ids": [] }
+// → { "semantic_ranking": true, "interpreted": {…}, "has_more": true, "note": "",
+//     "items": [{ "dish_id": "…", "match_percent": 87, "semantic_score": 0.61, "goal_matches": 1, "reasons": ["Matches your high-protein goal", …] }] }
 ```
 
-**Ranking** = `0.25 × goal matches + Qdrant similarity`. If Qdrant is down, ranking uses goal matches only.
+**Live, never stored.** Each call re-reads menu, stock, profile, order history and ratings. The query is parsed for nutrition tags, budget, calorie hints, meal period and exclusions (`without milk`, `peanut free`). Allergens (profile + query) are hard filters on declared allergens and ingredient names. Score = query/Qdrant match + goals + history/ratings + popularity − repeat-meal penalty. `exclude_dish_ids` returns different dishes on demand.
 
 | Image feature | Status | Delivered by |
 |---|---|---|
 | Qdrant semantic search | ✅ | [backend/app/core/semantic.py](backend/app/core/semantic.py) (optional, graceful fallback) |
 | Nutrition-aware ranking | ✅ | Wellness goals vs recipe nutrition tags |
 | Personalised suggestions | ✅ | Diet + allergen filter + goals + availability |
-| Track conversion | ✅ | `recommendation_events` + `recommended` flag on order lines → `recommendation_share` KPI |
+| Track conversion | ✅ | `recommended_dish_ids` on `POST /orders` → `recommended` flag on order lines → `recommendation_share` KPI |
 
 ### 3.6 Forecasting
 *Image features: demand prediction · ingredient requirement · waste & revenue forecast · historical trend analysis*
@@ -179,6 +186,10 @@ Nutrition tags (`high_protein`, `high_fibre`, `lower_sodium`, `balanced`) are **
 |---|---|---|---|---|
 | POST | `/forecast/run` | manager | Same-weekday average over N weeks → customers, dish portions, ingredient needs, shortfalls, projected value | Forecasting |
 | GET | `/forecast/latest` | manager | Latest saved forecast (`?forecast_date=`) | Forecasting |
+| GET | `/forecast/model` | manager | Trained model status + MAE/WAPE vs baseline | Forecasting → Prediction models |
+| POST | `/forecast/model/train` | manager | Retrain Random Forest customer- and dish-demand models from MongoDB | Retrain models button |
+
+> Models live in [ml/](ml/) (`features.py`, `train.py`, `predictor.py`). A model is used only if it beats the same-weekday baseline on held-out dates; otherwise the baseline is used. CLI: `.venv/bin/python -m ml.train`.
 
 ```json
 // POST /forecast/run
@@ -271,7 +282,7 @@ No dedicated router. These existing endpoints cover procurement:
 | **Qdrant** (food embeddings, similar dishes) | ✅ | Used for ranking; no standalone “similar dishes” endpoint |
 | **LLM (optional)** | ❌ | Not wired. Copilot uses intent rules. |
 | **Background jobs**: forecast refresh, KPI aggregation, stock alert checks, data enrichment | 🟡 | All run **on demand**: you trigger a forecast, and KPIs and alerts are computed when requested. Nothing is scheduled. |
-| **MongoDB**: Users, Recipes & Ingredients, Menus, Orders, Inventory & Movements, Feedback, Forecast Results | ✅ | Plus `recommendation_events` |
+| **MongoDB**: Users, Recipes & Ingredients, Menus, Orders, Inventory & Movements, Feedback, Forecast Results | ✅ | Recipes, ingredients, menus, orders, inventory, feedback, forecasts |
 | **MongoDB**: KPI Snapshots | ❌ | KPIs are calculated live and not stored |
 | “Motor – Async” | 🟡 | Uses synchronous PyMongo. FastAPI runs sync routes in a thread pool, which is fine at demo scale. |
 

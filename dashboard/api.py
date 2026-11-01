@@ -74,6 +74,12 @@ def recommendations(user_id: str, meal_period: str | None, query: str, limit: in
                                     "exclude_dish_ids": list(exclude)})
 
 
+@st.cache_data(ttl=10, show_spinner=False)
+def meal_plan(user_id: str, query: str) -> dict:
+    """Live day plan; user_id keys the short-lived cache per user."""
+    return post("/recommendations/meal-plan", {"query": query})
+
+
 def load(path: str, **params: Any) -> Any | None:
     """GET for page rendering: shows the error inline and returns None instead of raising."""
     try:
