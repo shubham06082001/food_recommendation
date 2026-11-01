@@ -1,0 +1,97 @@
+ECOS - run and test commands
+
+./start.sh
+
+
+============================
+Run everything from the project root:
+    cd /Users/shubham.kumar.3/Desktop/Food_Recipe
+
+Architecture: Streamlit dashboard (8501) -> FastAPI backend (8000) -> MongoDB (+ Qdrant for semantic ranking)
+The dashboard never talks to MongoDB directly; every read/write goes through the API.
+
+
+0) PREREQUISITES (one time)
+---------------------------
+# MongoDB must be running. The backend reads DB_URL from .env (currently host.docker.internal:20000,
+# which is rewritten to localhost:20000 when not inside Docker). Override with ECOS_MONGODB_URI if needed.
+# Qdrant is optional: with it, recommendations use semantic ranking; without it, goal-based ranking.
+
+uv sync                                    # install/refresh dependencies into .venv
+chmod +x start.sh                          # make the one-stop launcher executable
+
+
+QUICK START (one command)
+-------------------------
+.venv/bin/python app.py        # or: uv run python app.py   (./start.sh does the same)
+# Starts the backend, waits for /api/v1/health (MongoDB connected), then opens the dashboard. Ctrl+C stops both.
+# Custom ports:  API_PORT=8010 UI_PORT=8510 .venv/bin/python app.py
+# Docker:        docker compose -f docker-compose.dev.yml up --build   (app + MongoDB)
+# Steps 2 and 3 below are the manual equivalent.
+
+
+1) SEED THE DATABASE (optional - the backend also seeds on first start)
+-----------------------------------------------------------------------
+uv run python -m backend.seed              # manager MGR001, 18 ingredients, 13 recipes, today's menus
+uv run python -m backend.seed --history    # also add 8 weeks of demo collected orders (forecasts, trends)
+uv run python -m backend.seed --reset --history   # WIPE all ECOS collections and start fresh
+
+
+2) START THE BACKEND (terminal 1)
+---------------------------------
+uv run uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --reload
+
+# Check:   http://localhost:8000/api/v1/health
+# Swagger: http://localhost:8000/docs
+
+
+3) START THE DASHBOARD (terminal 2)
+-----------------------------------
+uv run streamlit run dashboard/app.py --server.port 8501
+
+# Open:    http://localhost:8501
+# If the API runs elsewhere:  ECOS_API_URL=http://<host>:8000/api/v1 uv run streamlit run dashboard/app.py
+
+
+4) LOGIN IDS
+------------
+MGR001            -> manager / admin workspace (seeded; managers cannot be self-created)
+any new ID        -> creates an employee (e.g. EMP001), asked for preferences first
+
+
+5) AUTOMATED TESTS (use a throwaway database, never the real one)
+-----------------------------------------------------------------
+# a) Backend: 64 checks across every endpoint (creates and drops database ECOS_test)
+ECOS_MONGODB_DB=ECOS_test uv run python -m backend.smoke_test
+
+# b) Dashboard: 21-step walkthrough of both journeys through the real UI
+#    Start a test API first (terminal A), then run the UI test (terminal B):
+ECOS_MONGODB_DB=ECOS_test uv run python -m backend.seed --reset --history
+ECOS_MONGODB_DB=ECOS_test uv run uvicorn backend.app.main:app --port 8011
+ECOS_API_URL=http://localhost:8011/api/v1 uv run python -m dashboard.ui_smoke_test
+#    Clean up afterwards:
+uv run python -c "from pymongo import MongoClient; MongoClient('mongodb://localhost:20000').drop_database('ECOS_test')"
+
+
+6) DEMO WALKTHROUGH (manual)
+----------------------------
+ 1. Log in as EMP001 -> Profile opens -> Vegetarian + High protein -> tick consent -> Save
+ 2. Menu -> Lunch -> "Recommended for you" (Qdrant-ranked, available, allergen-filtered)
+ 3. Add "Matar paneer bowl" to cart -> Cart -> Place order (demo payment) -> pickup reference
+ 4. Sign out -> log in as MGR001 -> Today shows the order, value, healthy-meal adoption
+ 5. Live orders -> Mark preparing -> ready -> collected
+ 6. Inventory -> Paneer reduced by 150 g per portion; order more paneer dishes to push it to Critical
+ 7. Inventory -> select Paneer -> affected dishes + movements -> Replenish -> back to Healthy
+ 8. Forecasting -> Run forecast -> expected orders, ingredient needs, shortfalls
+ 9. Executive -> customer / operations / inventory / financial KPIs
+10. Copilot -> "Which ingredients are critical?"
+11. Sign out -> EMP001 -> My wellness -> collected order counts toward high protein
+
+
+7) TROUBLESHOOTING
+------------------
+"Cannot reach the ECOS backend"     -> start step 2, or set ECOS_API_URL
+Backend fails with ServerSelectionTimeoutError -> MongoDB not reachable; check DB_URL / ECOS_MONGODB_URI
+"Address already in use"            -> lsof -nP -iTCP:8000 -sTCP:LISTEN   (then stop it, or use another --port)
+Recommendations say "Goal-based ranking" -> Qdrant is down or the food_nutrients collection is missing (still works)
+Stale menus after midnight           -> the API publishes the default menu for the new day automatically

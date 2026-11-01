@@ -1,0 +1,243 @@
+{
+  "baseUrl": "http://localhost:8000/api/v1",
+  "docs": "http://localhost:8000/docs",
+  "auth": {
+    "header": "X-User-Id",
+    "roles": ["employee", "manager"],
+    "levels": {
+      "public": "no header needed",
+      "user": "any logged-in user (401 if header missing/unknown)",
+      "self_or_manager": "own user_id, or a manager (403 otherwise)",
+      "employee": "employee role only",
+      "manager": "manager role only (403 for employees)"
+    }
+  },
+  "errors": {"400": "business rule", "401": "login required", "403": "role", "404": "not found",
+             "409": "stock / concurrent update conflict", "413": "file > 5 MB", "422": "validation",
+             "503": "database unavailable"},
+  "modules": {
+    "health": {
+      "architectureModule": "Platform",
+      "routes": {
+        "health": {"method": "GET", "path": "/health", "auth": "public",
+                   "response": {"status": "healthy", "database": "connected"}}
+      }
+    },
+    "userProfile": {
+      "architectureModule": "User & Profile",
+      "collections": ["users"],
+      "routes": {
+        "login": {"method": "POST", "path": "/auth/login", "auth": "public",
+                  "body": {"user_id": "string ^[A-Za-z0-9_-]{2,40}$"},
+                  "response": {"user_id": "string", "name": "string", "role": "employee|manager",
+                               "profile_complete": "bool", "next_screen": "employee_home|manager_home"},
+                  "notes": "Unknown IDs auto-create an employee; managers are seeded only."},
+        "getUser": {"method": "GET", "path": "/users/{user_id}", "auth": "self_or_manager",
+                    "response": {"user_id": "string", "name": "string", "role": "string",
+                                 "preferences": "object", "profile_complete": "bool"}},
+        "savePreferences": {"method": "PUT", "path": "/users/{user_id}/preferences", "auth": "employee (self)",
+                            "body": {"name": "string?",
+                                     "dietary_preference": "vegetarian|vegan|eggetarian|non_vegetarian|no_preference",
+                                     "wellness_goals": ["high_protein|high_fibre|lower_sodium|balanced"],
+                                     "declared_allergens": ["string"], "favourite_categories": ["string"],
+                                     "consented": "bool (must be true)"},
+                            "response": {"success": true, "profile_complete": true, "preferences": "object"}},
+        "listUsers": {"method": "GET", "path": "/users", "auth": "public",
+                      "response": {"success": true, "data": [{"user_id": "string", "name": "string",
+                                                              "role": "string", "profile_complete": "bool"}]}}
+      }
+    },
+    "menuCatalog": {
+      "architectureModule": "Menu & Catalog",
+      "collections": ["recipes", "menus", "ingredients"],
+      "routes": {
+        "listRecipes": {"method": "GET", "path": "/recipes", "auth": "public", "query": ["evidence_status"],
+                        "response": {"success": true, "data": [{"dish_id": "string", "name": "string", "price": "number",
+                                     "diet": "veg|egg|non_veg", "meal_periods": ["string"], "declared_allergens": ["string"],
+                                     "nutrition": "object", "nutrition_tags": ["string"], "ingredients": ["line"],
+                                     "evidence_status": "string"}]}},
+        "uploadRecipes": {"method": "POST", "path": "/upload/recipes", "auth": "manager",
+                          "contentType": "multipart/form-data",
+                          "fields": {"file": ".xlsx|.csv (<=5 MB)", "mode": "validate|commit (default commit)"},
+                          "requiredColumns": ["dish_id", "dish_name", "ingredient_id", "quantity_per_portion"],
+                          "optionalColumns": ["price", "diet", "meal_periods (a|b)", "allergens (a|b)", "protein_g",
+                                              "fibre_g", "sodium_mg", "energy_kcal", "catalog_code", "evidence_status"],
+                          "response": {"success": "bool", "mode": "string", "updated": "int", "errors": ["string"]},
+                          "notes": "All-or-nothing: any invalid row means nothing is written."},
+        "getMenu": {"method": "GET", "path": "/menu", "auth": "public", "query": ["meal_period", "user_id", "date"],
+                    "response": {"meal_period": "string", "date": "YYYY-MM-DD",
+                                 "items": [{"dish_id": "string", "menu_id": "string", "available": "bool",
+                                            "unavailable_reason": "string", "maximum_portions": "int",
+                                            "eligible": "bool (when user_id given)", "eligibility_note": "string"}]}},
+        "publishMenu": {"method": "POST", "path": "/menu", "auth": "manager",
+                        "body": {"date": "YYYY-MM-DD", "meal_period": "breakfast|snacks|lunch|dinner",
+                                 "dish_ids": ["string (confirmed recipes only)"]},
+                        "response": {"success": true, "menu_id": "string", "dish_count": "int"}},
+        "pauseMenuItem": {"method": "PATCH", "path": "/menu/{menu_id}/items/{dish_id}", "auth": "manager",
+                          "body": {"paused": "bool"},
+                          "response": {"success": true, "menu_id": "string", "dish_id": "string", "paused": "bool"}}
+      }
+    },
+    "ordering": {
+      "architectureModule": "Ordering",
+      "collections": ["orders", "ingredients", "inventory_movements", "recommendation_events"],
+      "routes": {
+        "createOrder": {"method": "POST", "path": "/orders", "auth": "employee",
+                        "body": {"items": [{"dish_id": "string", "quantity": "int 1-10"}],
+                                 "recommendation_event_id": "string?"},
+                        "response": {"success": true, "order_id": "string", "pickup_reference": "string",
+                                     "total": "number", "status": "confirmed"},
+                        "notes": "Mock payment (payment=demo_paid). Atomic conditional stock deduction; 409 + full rollback if any ingredient is short."},
+        "listOrders": {"method": "GET", "path": "/orders", "auth": "user",
+                       "query": ["user_id", "status", "date", "limit (<=500)"],
+                       "response": {"success": true, "data": ["order + rating"]},
+                       "notes": "Employees always get only their own orders."},
+        "getOrder": {"method": "GET", "path": "/orders/{order_id}", "auth": "self_or_manager", "response": "order"},
+        "updateStatus": {"method": "PATCH", "path": "/orders/{order_id}/status", "auth": "manager",
+                         "body": {"status": "confirmed|preparing|ready|collected|cancelled"},
+                         "response": {"success": true, "order_id": "string", "status": "string"},
+                         "notes": "confirmed->preparing->ready->collected; cancel allowed before ready and restores stock."}
+      }
+    },
+    "inventory": {
+      "architectureModule": "Inventory",
+      "collections": ["ingredients", "inventory_movements", "recipes"],
+      "routes": {
+        "listInventory": {"method": "GET", "path": "/inventory", "auth": "manager", "query": ["status"],
+                          "response": {"success": true, "data": [{"ingredient_id": "string", "name": "string",
+                                       "quantity": "number", "unit": "string", "reorder_point": "number",
+                                       "status": "HEALTHY|CRITICAL|STOCKOUT"}]}},
+        "createIngredient": {"method": "POST", "path": "/inventory", "auth": "manager",
+                             "body": {"ingredient_id": "string", "name": "string", "quantity": "number>=0",
+                                      "unit": "string", "reorder_point": "number>=0"},
+                             "response": {"success": true, "data": "ingredient"}},
+        "updateIngredient": {"method": "PATCH", "path": "/inventory/{ingredient_id}", "auth": "manager",
+                             "body": {"name": "string?", "reorder_point": "number?"},
+                             "response": {"success": true, "data": "ingredient"}},
+        "alerts": {"method": "GET", "path": "/inventory/alerts", "auth": "manager",
+                   "response": {"success": true, "data": [{"ingredient_id": "string", "status": "CRITICAL|STOCKOUT",
+                                "affected_dishes": "int", "suggested_replenishment": "2*reorder_point - quantity"}]}},
+        "replenish": {"method": "POST", "path": "/inventory/{ingredient_id}/replenish", "auth": "manager",
+                      "body": {"quantity": "number>0", "note": "string"},
+                      "response": {"success": true, "previous_quantity": "number", "added_quantity": "number",
+                                   "new_quantity": "number", "unit": "string", "status": "string"}},
+        "affectedDishes": {"method": "GET", "path": "/inventory/{ingredient_id}/affected-dishes", "auth": "manager",
+                           "response": {"success": true, "ingredient": "ingredient",
+                                        "data": [{"dish_id": "string", "name": "string",
+                                                  "quantity_per_portion": "number", "portions_possible": "int"}]}},
+        "movements": {"method": "GET", "path": "/inventory/{ingredient_id}/movements", "auth": "manager",
+                      "query": ["limit (<=500)"],
+                      "response": {"success": true, "data": [{"type": "opening_stock|stock_upload|order_consumption|order_cancelled|replenishment",
+                                                              "quantity": "signed number", "user_id": "string",
+                                                              "order_id": "string?", "created_at": "iso"}]}},
+        "uploadInventory": {"method": "POST", "path": "/upload/inventory", "auth": "manager",
+                            "contentType": "multipart/form-data",
+                            "fields": {"file": ".xlsx|.csv (<=5 MB)", "mode": "validate|commit (default commit)"},
+                            "requiredColumns": ["ingredient_id", "name", "quantity", "unit", "reorder_point"],
+                            "response": {"success": "bool", "mode": "string", "updated": "int", "errors": ["string"]},
+                            "notes": "Upserts stock; logs a stock_upload movement for the delta."}
+      }
+    },
+    "recommendations": {
+      "architectureModule": "Recommendations",
+      "collections": ["recipes", "menus", "users", "recommendation_events"],
+      "external": "Qdrant collection food_nutrients (optional; falls back to goal ranking)",
+      "routes": {
+        "recommend": {"method": "POST", "path": "/recommendations", "auth": "user",
+                      "body": {"meal_period": "breakfast|snacks|lunch|dinner", "query": "string<=200",
+                               "limit": "int 1-20"},
+                      "response": {"recommendation_event_id": "string", "query": "string", "semantic_ranking": "bool",
+                                   "items": [{"dish_id": "string", "semantic_score": "number", "goal_matches": "int",
+                                              "maximum_portions": "int", "reasons": ["string"]}]},
+                      "notes": "Only available + diet/allergen-eligible dishes. Event id is passed to POST /orders to track conversion."}
+      }
+    },
+    "forecasting": {
+      "architectureModule": "Forecasting",
+      "collections": ["orders", "menus", "recipes", "ingredients", "forecasts"],
+      "routes": {
+        "run": {"method": "POST", "path": "/forecast/run", "auth": "manager",
+                "body": {"date": "YYYY-MM-DD (default tomorrow)", "meal_period": "string? (null = all)",
+                         "buffer_percent": "0-50", "weeks": "1-12"},
+                "response": {"forecast_id": "string", "method": "same_weekday_average|default_no_history",
+                             "expected_customers": "number", "expected_customers_by_period": "object",
+                             "dishes": [{"expected_orders": "number", "recommended_preparation": "int",
+                                         "projected_order_value": "number"}],
+                             "ingredients": [{"required": "number", "on_hand": "number", "shortfall": "number"}],
+                             "shortfalls": ["ingredient"], "projected_order_value": "number"}},
+        "latest": {"method": "GET", "path": "/forecast/latest", "auth": "manager", "query": ["forecast_date"],
+                   "response": "forecast (404 if none)"}
+      }
+    },
+    "analytics": {
+      "architectureModule": "Analytics & KPIs",
+      "collections": ["orders", "feedback", "ingredients", "inventory_movements", "forecasts", "recommendation_events"],
+      "routes": {
+        "employeeDashboard": {"method": "GET", "path": "/dashboard/employee/{user_id}", "auth": "self_or_manager",
+                              "response": {"name": "string", "profile_complete": "bool", "current_meal_period": "string",
+                                           "active_order": "order?", "previous_order": "order?",
+                                           "wellness_summary": "object", "as_of": "iso"}},
+        "managerDashboard": {"method": "GET", "path": "/dashboard/manager", "auth": "manager",
+                             "response": {"orders_today": "int", "accepted_order_value": "number",
+                                          "average_order_value": "number", "collected_orders": "int",
+                                          "active_orders": "int", "cancelled_orders": "int", "top_dishes": ["object"],
+                                          "healthy_meal_adoption": "pct", "recommendation_share": "pct",
+                                          "status_counts": "object", "average_rating": "number?",
+                                          "critical_stock_count": "int", "stockout_count": "int",
+                                          "inventory_alerts": ["object"], "expected_customers": "number?",
+                                          "actual_customers": "int", "as_of": "iso", "data_state": "connected"}},
+        "executiveDashboard": {"method": "GET", "path": "/dashboard/executive", "auth": "manager",
+                               "query": ["days (1-365, default 30)"],
+                               "response": {"customer": {"average_rating": "number?", "ratings_count": "int",
+                                                         "repeat_order_rate": "pct", "recommendation_share": "pct",
+                                                         "healthy_meal_adoption": "pct", "customers": "int"},
+                                            "operations": {"orders": "int", "fulfilment_rate": "pct",
+                                                           "average_completion_minutes": "number?",
+                                                           "cancelled_orders": "int", "forecast_vs_actual": ["object"]},
+                                            "inventory": {"critical_stock_count": "int", "stockout_count": "int",
+                                                          "replenishments": "int", "top_consumption": ["object"]},
+                                            "financial": {"accepted_order_value": "number",
+                                                          "collected_order_value": "number",
+                                                          "average_order_value": "number"},
+                                            "top_dishes": ["object"], "monthly_trend": ["object"]}}
+      }
+    },
+    "procurement": {
+      "architectureModule": "Procurement (Simplified)",
+      "routes": {},
+      "servedBy": ["GET /inventory/alerts (reorder recommendation)", "GET /inventory/{ingredient_id}/affected-dishes",
+                   "POST /forecast/run (ingredient shortfalls)"],
+      "notImplemented": ["supplier info", "lead time estimates", "GET /dashboard/procurement"]
+    },
+    "feedbackBehaviour": {
+      "architectureModule": "Feedback & Customer Behaviour",
+      "collections": ["feedback", "orders", "users", "recommendation_events"],
+      "routes": {
+        "submitFeedback": {"method": "POST", "path": "/feedback", "auth": "user (order owner)",
+                           "body": {"order_id": "string", "rating": "int 1-5",
+                                    "reason": "taste|portion|quality|waiting_time|other", "comment": "string<=500"},
+                           "response": {"success": true},
+                           "notes": "One rating per order (upsert); cancelled orders cannot be rated."},
+        "wellnessMonthly": {"method": "GET", "path": "/wellness/{user_id}/monthly", "auth": "self_or_manager",
+                            "query": ["month (YYYY-MM)"],
+                            "response": {"wellness_score": "int 20-100 (20 base, +10 healthy / +5 other portion ordered this month)",
+                                         "meals_tracked": "int", "categories": "object", "goal_progress": ["object"],
+                                         "recommendation_engagement": "object", "meal_period_coverage": "object",
+                                         "top_dishes": ["object"], "disclaimer": "string"}},
+        "wellnessTrend": {"method": "GET", "path": "/wellness/{user_id}/trend", "auth": "self_or_manager",
+                          "query": ["months (1-24)"], "response": {"trend": ["object"], "disclaimer": "string"}}
+      }
+    },
+    "copilot": {
+      "architectureModule": "AI Copilot (Read-only)",
+      "routes": {
+        "ask": {"method": "POST", "path": "/copilot", "auth": "manager",
+                "body": {"question": "string 2-300"},
+                "response": {"intent": "inventory_alerts|affected_dishes|forecast|healthy_trend|recommendation_conversion|top_dishes|sales_summary|unknown",
+                             "answer": "string", "evidence": ["string"], "read_only": true, "as_of": "iso"}},
+        "suggestions": {"method": "GET", "path": "/copilot/suggestions", "auth": "public",
+                        "response": {"suggestions": ["string"]}}
+      }
+    }
+  }
+}

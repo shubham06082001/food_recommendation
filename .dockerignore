@@ -1,0 +1,15 @@
+.git
+.venv
+venv
+__pycache__
+.pytest_cache
+.ipynb_checkpoints
+.env
+
+*.pyc
+*.pyo
+
+data/raw
+artifacts
+notebooks
+.DS_Store

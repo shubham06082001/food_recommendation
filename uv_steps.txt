@@ -1,0 +1,237 @@
+# ============================================================
+# UV SETUP GUIDE - Food Recipe / Anuvaad INDB Project
+# ============================================================
+# Date: 2026-08-14
+# Python Version: 3.12
+# Project: AI-Enabled Food Intelligence for Cafeteria Management
+# ============================================================
+
+
+# ------------------------------------------------------------
+# SECTION 1: INSTALL UV (if not already installed)
+# ------------------------------------------------------------
+
+# Install uv via curl (recommended)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# OR via Homebrew (Mac)
+brew install uv
+
+# Verify installation
+uv --version
+
+
+# ------------------------------------------------------------
+# SECTION 2: RESET EXISTING ENVIRONMENT (clean slate)
+# ------------------------------------------------------------
+
+# Remove existing virtual environment and lock file
+rm -rf .venv uv.lock
+
+
+# ------------------------------------------------------------
+# SECTION 3: INITIALIZE PROJECT (if starting fresh)
+# ------------------------------------------------------------
+
+# Navigate to project root
+cd /Users/shubham.kumar.3/Desktop/Food_Recipe
+
+# Initialize uv project (creates pyproject.toml if not exists)
+uv init --no-workspace
+
+
+# ------------------------------------------------------------
+# SECTION 4: CREATE VIRTUAL ENVIRONMENT
+# ------------------------------------------------------------
+
+# Create a new virtual environment with Python 3.12
+uv venv --python 3.12
+
+# Activate the virtual environment (Mac/Linux)
+source .venv/bin/activate
+
+# To deactivate later
+# deactivate
+
+
+# ------------------------------------------------------------
+# SECTION 5: ADD ALL REQUIRED DEPENDENCIES
+# ------------------------------------------------------------
+
+# Core data science libraries
+uv add pandas numpy matplotlib seaborn scikit-learn scipy
+
+# Statistical analysis (required for VIF in Section 8)
+uv add statsmodels
+
+# Excel file support (required for reading .xlsx dataset)
+uv add openpyxl
+
+# Jupyter environment
+uv add jupyter ipykernel notebook
+
+# Development utilities
+uv add ipywidgets
+
+
+# ------------------------------------------------------------
+# SECTION 6: INSTALL ALL DEPENDENCIES (from lock file)
+# ------------------------------------------------------------
+
+# Install all pinned dependencies from uv.lock
+uv sync
+
+
+# ------------------------------------------------------------
+# SECTION 7: REGISTER JUPYTER KERNEL
+# ------------------------------------------------------------
+
+# Register the virtual environment as a Jupyter kernel
+uv run python -m ipykernel install --user --name food-recipe --display-name "Food Recipe (3.12)"
+
+# Verify kernel is registered
+jupyter kernelspec list
+
+
+# ------------------------------------------------------------
+# SECTION 8: LAUNCH JUPYTER NOTEBOOK
+# ------------------------------------------------------------
+
+# Launch Jupyter Notebook
+uv run jupyter notebook
+
+# OR launch Jupyter Lab (if preferred)
+uv run jupyter lab
+
+# Launch a specific notebook directly
+uv run jupyter notebook notebooks/1_Anuvaad.ipynb
+
+
+# ------------------------------------------------------------
+# SECTION 9: USEFUL UV COMMANDS (day-to-day)
+# ------------------------------------------------------------
+
+# Check all installed packages and versions
+uv pip list
+
+# Add a new package
+uv add <package-name>
+
+# Remove a package
+uv remove <package-name>
+
+# Update all packages
+uv sync --upgrade
+
+# Update a specific package
+uv add <package-name> --upgrade
+
+# Show dependency tree
+uv tree
+
+# Run any python script inside the venv
+uv run python <script.py>
+
+# Run a module inside the venv
+uv run python -m <module>
+
+# Export requirements.txt (for compatibility)
+uv pip freeze > requirements.txt
+
+# Check for outdated packages
+uv tree --outdated
+
+
+# ------------------------------------------------------------
+# SECTION 10: VS CODE INTEGRATION
+# ------------------------------------------------------------
+
+# After activating the venv, in VS Code:
+# 1. Press Cmd+Shift+P
+# 2. Select: "Python: Select Interpreter"
+# 3. Choose: .venv/bin/python
+#
+# For Jupyter notebooks in VS Code:
+# 1. Open the .ipynb file
+# 2. Click "Select Kernel" (top right)
+# 3. Choose: "Food Recipe (3.12)"
+
+
+# ------------------------------------------------------------
+# SECTION 11: PROJECT DIRECTORY STRUCTURE
+# ------------------------------------------------------------
+
+# Expected folder structure:
+# Food_Recipe/
+# ├── .venv/                        <- virtual environment (auto-created)
+# ├── data/
+# │   ├── raw/
+# │   │   └── Anuvaad_INDB_2024.11.xlsx
+# │   └── processed/
+# │       └── phase1_cleaned_master.csv
+# ├── notebooks/
+# │   └── 1_Anuvaad.ipynb
+# ├── artifacts/
+# │   ├── regression_leaderboard.csv
+# │   ├── classification_leaderboard.csv
+# │   ├── cluster_profile_summary.csv
+# │   ├── phase1_model_metrics.csv
+# │   ├── phase1_cluster_labels.csv
+# │   ├── phase1_cluster_profiles.csv
+# │   └── phase1_quality_report.md
+# ├── pyproject.toml                <- uv project config
+# ├── uv.lock                       <- auto-generated lock file
+# └── uv_steps.txt                  <- this file
+
+
+# ------------------------------------------------------------
+# SECTION 12: FULL ONE-TIME SETUP (copy-paste sequence)
+# ------------------------------------------------------------
+
+# Run these commands in order for a complete fresh setup:
+
+# cd /Users/shubham.kumar.3/Desktop/Food_Recipe
+# rm -rf .venv uv.lock
+# uv venv --python 3.12
+# source .venv/bin/activate
+# uv add pandas numpy matplotlib seaborn scikit-learn scipy statsmodels openpyxl jupyter ipykernel notebook ipywidgets
+# uv sync
+# uv run python -m ipykernel install --user --name food-recipe --display-name "Food Recipe (3.12)"
+# uv run jupyter notebook notebooks/1_Anuvaad.ipynb
+
+
+# ------------------------------------------------------------
+# SECTION 13: TROUBLESHOOTING
+# ------------------------------------------------------------
+
+# Problem: Python version not found
+# Fix:
+# uv python install 3.12
+# uv venv --python 3.12
+
+# Problem: Kernel not showing in Jupyter
+# Fix:
+# uv run python -m ipykernel install --user --name food-recipe --display-name "Food Recipe (3.12)"
+# jupyter kernelspec list
+
+# Problem: Package import error inside notebook
+# Fix: Ensure correct kernel is selected, then:
+# uv add <missing-package>
+# uv sync
+
+# Problem: statsmodels not found (needed for VIF in Section 8)
+# Fix:
+# uv add statsmodels
+
+# Problem: openpyxl not found (needed to read .xlsx)
+# Fix:
+# uv add openpyxl
+
+# Problem: uv.lock conflict after manual edits
+# Fix:
+# rm uv.lock
+# uv sync
+
+# ============================================================
+# END OF UV SETUP GUIDE
+# ============================================================

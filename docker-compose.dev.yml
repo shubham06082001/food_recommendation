@@ -1,0 +1,21 @@
+services:
+  app:
+    build: .
+    image: ecos-app
+    ports:
+      - "8000:8000"
+      - "8501:8501"
+    environment:
+      - ECOS_MONGODB_URI=mongodb://mongo:27017
+      - ECOS_MONGODB_DB=Food_Recipe
+    depends_on:
+      - mongo
+  mongo:
+    image: mongo:7
+    restart: always
+    ports:
+      - "27017:27017"
+    volumes:
+      - food-reco-mongo-data:/data/db
+volumes:
+  food-reco-mongo-data:

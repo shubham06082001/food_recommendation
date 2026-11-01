@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+streamlit
+requests
+pymongo
+qdrant-client
+pandas
+openpyxl
+scikit-learn
+joblib
