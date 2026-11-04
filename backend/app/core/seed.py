@@ -1,13 +1,16 @@
-"""Idempotent demo seed: manager account, ingredients, confirmed recipes, and today's menus."""
+"""Bootstrap for an empty database, plus optional demo data (ingredients with stock lines, order history)."""
 
+import logging
 import random
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
-from .common import MEAL_PERIODS, now_utc, nutrition_tags, today
+from .common import now_utc, nutrition_tags
+from .config import settings
+from .security import hash_password, verify_password
 
-MANAGERS = [{"user_id": "MGR001", "name": "Asha Rao", "role": "manager"}]
+logger = logging.getLogger(__name__)
 
 # (ingredient_id, name, quantity, unit, reorder_point)
 INGREDIENTS = [
@@ -70,70 +73,49 @@ RECIPES = [
      ["egg", "wheat"], 12.4, 3.0, 334, 290, [("ING_EGG", 2), ("ING_BREAD", 2)]),
 ]
 
-# Wikipedia article (or search term) whose lead Wikimedia Commons photo illustrates each dish.
-IMAGE_QUERIES = {
-    "DISH_RAVA_DALIA": "Upma", "DISH_MEETHA_DALIA": "Dalia porridge", "DISH_IDLI": "Idli",
-    "DISH_EGG_BHURJI": "Egg bhurji", "DISH_MATAR_PANEER": "Matar paneer", "DISH_PALAK_PANEER": "Palak paneer",
-    "DISH_VEG_BIRYANI": "Vegetable biryani", "DISH_RAJMA": "Rajma", "DISH_MOONG_DAL": "Dal tadka",
-    "DISH_MIXED_DAL": "Dal", "DISH_MUTTON_BIRYANI": "Hyderabadi biryani", "DISH_SPROUT_CHAAT": "Chaat",
-    "DISH_EGG_SANDWICH": "Egg sandwich",
-}
+
+def bootstrap(db: Any) -> None:
+    """The environment is the source of truth: the manager is created, or re-synced if the password in .env changed."""
+    if not settings.manager_password:
+        logger.error("ECOS_MANAGER_PASSWORD is not set: no manager can log in until it is configured")
+        return
+    stored = (db.users.find_one({"user_id": settings.manager_id}) or {}).get("password_hash", "")
+    if verify_password(settings.manager_password, stored):
+        return
+    db.users.update_one(
+        {"user_id": settings.manager_id},
+        {"$set": {"password_hash": hash_password(settings.manager_password), "role": "manager",
+                  "profile_complete": True, "updated_at": now_utc()},
+         "$setOnInsert": {"name": "Cafeteria manager", "preferences": {}, "created_at": now_utc()}}, upsert=True)
 
 
 def recipe_documents() -> list[dict[str, Any]]:
-    docs = []
-    for (dish_id, name, code, price, diet, periods, allergens, protein, fibre, sodium, kcal, lines) in RECIPES:
-        units = {ing[0]: ing[3] for ing in INGREDIENTS}
-        docs.append({
-            "dish_id": dish_id, "name": name, "catalog_code": code, "price": price, "diet": diet,
-            "meal_periods": periods, "declared_allergens": allergens,
-            "nutrition": {"protein_g": protein, "fibre_g": fibre, "sodium_mg": sodium, "energy_kcal": kcal},
-            "nutrition_tags": nutrition_tags(protein, fibre, sodium, kcal),
-            "ingredients": [{"ingredient_id": i, "quantity": q, "unit": units[i]} for i, q in lines],
-            "evidence_status": "confirmed", "image_query": IMAGE_QUERIES.get(dish_id), "updated_at": now_utc(),
-        })
-    return docs
+    units = {ing[0]: ing[3] for ing in INGREDIENTS}
+    return [{
+        "dish_id": dish_id, "name": name, "catalog_code": code, "price": price, "diet": diet,
+        "meal_periods": periods, "declared_allergens": allergens, "on_menu": True,
+        "nutrition": {"protein_g": protein, "fibre_g": fibre, "sodium_mg": sodium, "energy_kcal": kcal},
+        "nutrition_tags": nutrition_tags(protein, fibre, sodium, kcal),
+        "ingredients": [{"ingredient_id": i, "quantity": q, "unit": units[i]} for i, q in lines],
+        "evidence_status": "confirmed", "source": "manager", "updated_at": now_utc(),
+    } for (dish_id, name, code, price, diet, periods, allergens, protein, fibre, sodium, kcal, lines) in RECIPES]
 
 
-def ensure_menus(db: Any, for_date: str) -> None:
-    """Publish a default menu for each meal period when none exists for the date."""
-    for period in MEAL_PERIODS:
-        if db.menus.find_one({"date": for_date, "meal_period": period}):
-            continue
-        dish_ids = [r["dish_id"] for r in db.recipes.find({"meal_periods": period, "evidence_status": "confirmed"})]
-        if dish_ids:
-            db.menus.insert_one({
-                "menu_id": f"MENU-{for_date}-{period}", "date": for_date, "meal_period": period,
-                "dish_ids": dish_ids, "paused_dish_ids": [], "published": True, "updated_at": now_utc(),
-            })
-
-
-def seed(db: Any) -> None:
-    for manager in MANAGERS:
-        db.users.update_one({"user_id": manager["user_id"]},
-                            {"$setOnInsert": {**manager, "profile_complete": True, "preferences": {},
-                                              "created_at": now_utc()}}, upsert=True)
-    if db.ingredients.count_documents({}) == 0:
-        db.ingredients.insert_many([
-            {"ingredient_id": i, "name": n, "quantity": q, "unit": u, "reorder_point": r,
-             "category": INGREDIENT_CATEGORIES.get(i, ""), "updated_at": now_utc()}
-            for i, n, q, u, r in INGREDIENTS
-        ])
-    for ingredient_id, category in INGREDIENT_CATEGORIES.items():
-        db.ingredients.update_one({"ingredient_id": ingredient_id, "category": {"$exists": False}},
-                                  {"$set": {"category": category}})
-    if db.recipes.count_documents({}) == 0:
-        db.recipes.insert_many(recipe_documents())
-    for dish_id, query in IMAGE_QUERIES.items():
-        db.recipes.update_one({"dish_id": dish_id, "image_query": {"$exists": False}},
-                              {"$set": {"image_query": query}, "$unset": {"image_url": ""}})
-    ensure_menus(db, today())
+def seed_demo(db: Any) -> None:
+    """Optional demo: stocked ingredients and 13 recipes with stock lines (so inventory features have data)."""
+    for i, n, q, u, r in INGREDIENTS:
+        db.ingredients.update_one({"ingredient_id": i}, {"$setOnInsert": {
+            "name": n, "quantity": q, "unit": u, "reorder_point": r,
+            "category": INGREDIENT_CATEGORIES.get(i, ""), "updated_at": now_utc()}}, upsert=True)
+    for doc in recipe_documents():
+        db.recipes.update_one({"dish_id": doc["dish_id"]}, {"$setOnInsert": {k: v for k, v in doc.items() if k != "dish_id"}},
+                              upsert=True)
 
 
 def seed_demo_history(db: Any, weeks: int = 8) -> int:
     """Create past collected orders (source=demo_seed) so forecasts and trends have history."""
-    recipes = {r["dish_id"]: r for r in db.recipes.find({})}
-    rng = random.Random(42)
+    recipes = {r["dish_id"]: r for r in db.recipes.find({"ingredients.0": {"$exists": True}})}
+    rng = random.Random(42)  # Demo data only; not security-sensitive.
     users = [f"DEMO{n:03d}" for n in range(1, 31)]
     for user_id in users:
         db.users.update_one({"user_id": user_id}, {"$setOnInsert": {

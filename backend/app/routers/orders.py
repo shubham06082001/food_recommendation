@@ -1,4 +1,4 @@
-import random
+import secrets
 from collections import defaultdict
 from datetime import datetime
 from typing import Any, Literal
@@ -6,13 +6,16 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
+from pymongo.errors import DuplicateKeyError, PyMongoError
 
-from ..core.common import (ORDER_STATUSES, current_meal_period, current_user, now_utc, record_movement,
+from ..core.common import (ORDER_STATUSES, current_meal_period, current_user, eligibility, now_utc, record_movement,
                            require_manager, require_self_or_manager, serialize, today)
 from ..core.database import get_db
-from ..core.menu import menu_items
+from ..core.menu import menu_items, per_portion_needs, stock_map
 
 router = APIRouter()
+
+MAX_PER_DISH = 10
 
 # Allowed forward transitions; cancellation is possible until the order is ready.
 TRANSITIONS = {
@@ -32,10 +35,17 @@ class OrderLine(BaseModel):
 class OrderRequest(BaseModel):
     items: list[OrderLine] = Field(min_length=1, max_length=15)
     recommended_dish_ids: list[str] = Field(default_factory=list, max_length=15)
+    client_request_id: str | None = Field(default=None, min_length=8, max_length=64,
+                                          description="Reuse the same value when retrying so no duplicate order is made")
 
 
 class StatusRequest(BaseModel):
     status: Literal["confirmed", "preparing", "ready", "collected", "cancelled"]
+
+
+def _restore(db: Any, done: list[tuple[str, float]]) -> None:
+    for ingredient_id, amount in done:
+        db.ingredients.update_one({"ingredient_id": ingredient_id}, {"$inc": {"quantity": amount}})
 
 
 def _deduct(db: Any, needs: dict[str, float]) -> list[tuple[str, float]]:
@@ -46,57 +56,74 @@ def _deduct(db: Any, needs: dict[str, float]) -> list[tuple[str, float]]:
             {"ingredient_id": ingredient_id, "quantity": {"$gte": amount}},
             {"$inc": {"quantity": -amount}, "$set": {"updated_at": now_utc()}})
         if not result.modified_count:
-            for rolled_id, rolled_amount in done:
-                db.ingredients.update_one({"ingredient_id": rolled_id}, {"$inc": {"quantity": rolled_amount}})
+            _restore(db, done)
             name = (db.ingredients.find_one({"ingredient_id": ingredient_id}) or {}).get("name", ingredient_id)
             raise HTTPException(status_code=409, detail=f"Not enough {name} in stock for this order")
         done.append((ingredient_id, amount))
     return done
 
 
+def _receipt(order: dict[str, Any]) -> dict[str, Any]:
+    return {"success": True, "order_id": order["order_id"], "pickup_reference": order["pickup_reference"],
+            "total": order["total"], "status": order["status"]}
+
+
 @router.post("/orders", status_code=201)
 def create_order(payload: OrderRequest, user: dict = Depends(current_user), db: Any = Depends(get_db)) -> dict:
     if user.get("role") != "employee":
         raise HTTPException(status_code=403, detail="Only employees can place orders")
-    period_now = current_meal_period(datetime.now().hour)
-    menu: dict[str, dict[str, Any]] = {}
-    # A dish served in several periods is attributed to the current one when possible.
-    for item in sorted(menu_items(db), key=lambda i: i["meal_period"] != period_now):
-        menu.setdefault(item["dish_id"], item)
+    if payload.client_request_id and (prior := db.orders.find_one(
+            {"user_id": user["user_id"], "request_id": payload.client_request_id})):
+        return _receipt(prior)  # A retry of an order that already went through.
     quantities: dict[str, int] = defaultdict(int)
     for line in payload.items:
         quantities[line.dish_id] += line.quantity
+    if any(q > MAX_PER_DISH for q in quantities.values()):
+        raise HTTPException(status_code=400, detail=f"Maximum {MAX_PER_DISH} portions per dish")
 
+    period_now = current_meal_period(datetime.now().hour)
+    menu = {i["dish_id"]: i for i in menu_items(db, dish_ids=quantities)}
+    stock = stock_map(db)
     recommended = set(payload.recommended_dish_ids)
-
     lines, needs = [], defaultdict(float)
     for dish_id, quantity in quantities.items():
         dish = menu.get(dish_id)
         if not dish:
-            raise HTTPException(status_code=400, detail=f"{dish_id} is not on today's menu")
+            raise HTTPException(status_code=400, detail=f"{dish_id} is not on the menu")
         if not dish["available"]:
             raise HTTPException(status_code=409, detail=f"{dish['name']} is unavailable: {dish['unavailable_reason']}")
-        for ingredient in dish["ingredients"]:
-            needs[ingredient["ingredient_id"]] += float(ingredient["quantity"]) * quantity
+        allowed, note = eligibility(dish, user.get("preferences", {}))
+        if not allowed:  # The UI disables these too; the server is the real gate for diet and allergens.
+            raise HTTPException(status_code=409, detail=f"{dish['name']} is not suitable for your profile: {note}")
+        for ingredient_id, per_portion in (per_portion_needs(dish, stock) or {}).items():
+            needs[ingredient_id] += per_portion * quantity
         lines.append({"dish_id": dish_id, "name": dish["name"], "quantity": quantity,
                       "unit_price": dish["price"], "line_total": dish["price"] * quantity,
-                      "meal_period": dish["meal_period"], "nutrition_tags": dish.get("nutrition_tags", []),
-                      "recommended": dish_id in recommended})
+                      "meal_period": period_now if period_now in dish["meal_periods"] else dish["meal_period"],
+                      "nutrition_tags": dish.get("nutrition_tags", []), "recommended": dish_id in recommended})
 
     order_id = f"ORD-{uuid4().hex[:10].upper()}"
-    _deduct(db, needs)
-    for ingredient_id, amount in needs.items():
-        record_movement(db, ingredient_id, "order_consumption", -amount, user["user_id"], order_id=order_id)
-
     order = {
-        "order_id": order_id, "pickup_reference": f"{random.choice('ABCDEFGH')}{random.randint(100, 999)}",
+        "order_id": order_id, "pickup_reference": f"{secrets.choice('ABCDEFGH')}{100 + secrets.randbelow(900)}",
         "user_id": user["user_id"], "items": lines, "total": sum(l["line_total"] for l in lines),
         "meal_period": lines[0]["meal_period"], "status": "confirmed", "payment": "demo_paid",
         "date": today(), "created_at": now_utc(),
+        **({"request_id": payload.client_request_id} if payload.client_request_id else {}),
     }
-    db.orders.insert_one(order)
-    return {"success": True, "order_id": order_id, "pickup_reference": order["pickup_reference"],
-            "total": order["total"], "status": "confirmed"}
+    deducted = _deduct(db, needs)
+    try:
+        db.orders.insert_one(order)
+        for ingredient_id, amount in needs.items():
+            record_movement(db, ingredient_id, "order_consumption", -amount, user["user_id"], order_id=order_id)
+    except DuplicateKeyError:  # The same request raced itself; keep the first order.
+        _restore(db, deducted)
+        return _receipt(db.orders.find_one({"user_id": user["user_id"], "request_id": payload.client_request_id}))
+    except PyMongoError:  # Undo the stock deduction so a failed order never loses inventory.
+        _restore(db, deducted)
+        db.orders.delete_one({"order_id": order_id})
+        db.inventory_movements.delete_many({"order_id": order_id})
+        raise
+    return _receipt(order)
 
 
 @router.get("/orders")
@@ -145,6 +172,9 @@ def update_status(order_id: str, payload: StatusRequest, manager: dict = Depends
     if payload.status == "cancelled":
         for movement in db.inventory_movements.find({"order_id": order_id, "type": "order_consumption"}):
             restored = -movement["quantity"]
+            if db.inventory_movements.find_one({"order_id": order_id, "type": "order_cancelled",
+                                                "ingredient_id": movement["ingredient_id"]}):
+                continue  # Already returned, e.g. by an interrupted earlier cancellation.
             db.ingredients.update_one({"ingredient_id": movement["ingredient_id"]}, {"$inc": {"quantity": restored}})
             record_movement(db, movement["ingredient_id"], "order_cancelled", restored, manager["user_id"],
                             order_id=order_id)

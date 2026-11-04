@@ -1,21 +1,29 @@
+# Local stack: app + MongoDB + Qdrant. Load the `food_nutrients` collection into Qdrant (e.g. from a snapshot);
+# the app then builds its whole menu from it on first start. Put ECOS_MANAGER_PASSWORD in .env.
 services:
   app:
     build: .
     image: ecos-app
     ports:
-      - "8000:8000"
-      - "8501:8501"
+      - "8501:7860"
     environment:
       - ECOS_MONGODB_URI=mongodb://mongo:27017
       - ECOS_MONGODB_DB=Food_Recipe
+      - QDRANT_VECTOR_DB_URL=http://qdrant:6333
+      - ECOS_MANAGER_PASSWORD=${ECOS_MANAGER_PASSWORD:?set ECOS_MANAGER_PASSWORD in .env}
     depends_on:
       - mongo
+      - qdrant
   mongo:
     image: mongo:7
     restart: always
-    ports:
-      - "27017:27017"
     volumes:
       - food-reco-mongo-data:/data/db
+  qdrant:
+    image: qdrant/qdrant
+    restart: always
+    volumes:
+      - food-reco-qdrant-data:/qdrant/storage
 volumes:
   food-reco-mongo-data:
+  food-reco-qdrant-data:

@@ -72,8 +72,11 @@ def train(db: Any) -> dict[str, Any]:
     lines = order_lines(orders)
     if lines.empty:
         raise InsufficientHistory("No order history yet. Run `python -m backend.seed --history` for demo data.")
+    # Only dishes that sold or have stock lines: ~1000 idle catalog dishes would drown the model in zero rows.
+    sold = set(lines["dish_id"])
     dishes_by_period: dict[str, list[str]] = {}
-    for recipe in db.recipes.find({}, {"dish_id": 1, "meal_periods": 1}):
+    for recipe in db.recipes.find({"$or": [{"ingredients.0": {"$exists": True}}, {"dish_id": {"$in": list(sold)}}]},
+                                  {"dish_id": 1, "meal_periods": 1}):
         for period in recipe.get("meal_periods", []):
             dishes_by_period.setdefault(period, []).append(recipe["dish_id"])
 

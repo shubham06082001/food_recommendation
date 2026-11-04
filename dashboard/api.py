@@ -33,8 +33,8 @@ def _message(response: httpx.Response) -> str:
 
 def request(method: str, path: str, **kwargs: Any) -> Any:
     headers = kwargs.pop("headers", {})
-    if user_id := st.session_state.get("user_id"):
-        headers["X-User-Id"] = user_id
+    if token := st.session_state.get("gt_session"):
+        headers.setdefault("X-Session-Token", token)
     try:
         response = _client().request(method, path, headers=headers, **kwargs)
     except httpx.HTTPError as error:
@@ -67,14 +67,19 @@ def patch(path: str, json: dict) -> Any:
     return request("PATCH", path, json=json)
 
 
-@st.cache_data(ttl=10, show_spinner=False)
-def recommendations(user_id: str, meal_period: str | None, query: str, limit: int, exclude: tuple) -> dict:
+@st.cache_data(ttl=10, show_spinner="Finding dishes for you…")
+def recommendations(user_id: str, meal_period: str | None, query: str, limit: int, offset: int = 0) -> dict:
     """Live engine call; the short TTL only absorbs Streamlit reruns. user_id keys the cache per user."""
-    return post("/recommendations", {"meal_period": meal_period, "query": query, "limit": limit,
-                                    "exclude_dish_ids": list(exclude)})
+    return post("/recommendations", {"meal_period": meal_period, "query": query, "limit": limit, "offset": offset})
 
 
-@st.cache_data(ttl=10, show_spinner=False)
+@st.cache_data(ttl=10, show_spinner="Loading the menu…")
+def menu_page(user_id: str, meal_period: str | None, query: str, limit: int, offset: int) -> dict:
+    """One page of the menu (eligibility is per user, so user_id keys the cache)."""
+    return get("/menu", meal_period=meal_period, q=query or None, limit=limit, offset=offset)
+
+
+@st.cache_data(ttl=10, show_spinner="Planning your day…")
 def meal_plan(user_id: str, query: str) -> dict:
     """Live day plan; user_id keys the short-lived cache per user."""
     return post("/recommendations/meal-plan", {"query": query})

@@ -14,7 +14,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 API_PORT = os.getenv("API_PORT", "8000")
-UI_PORT = os.getenv("UI_PORT", "8501")
+UI_PORT = os.getenv("PORT") or os.getenv("UI_PORT", "8501")  # PORT is injected by most hosting platforms
 HEALTH_URL = f"http://127.0.0.1:{API_PORT}/api/v1/health"
 # Bypass corporate proxy settings for localhost health checks.
 _opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -33,14 +33,15 @@ def start_backend(env: dict) -> subprocess.Popen | None:
         print(f"ECOS backend already running on :{API_PORT}")
         return None
     print(f"Starting ECOS backend on :{API_PORT} ...")
+    # The API stays private to the container (localhost); only the Streamlit UI is exposed.
     backend = subprocess.Popen([sys.executable, "-m", "uvicorn", "backend.app.main:app",
-                                "--host", "0.0.0.0", "--port", API_PORT], cwd=ROOT, env=env)
+                                "--host", "127.0.0.1", "--port", API_PORT], cwd=ROOT, env=env)
     for _ in range(60):
         if backend_up():
             print("ECOS backend ready (MongoDB connected).")
             return backend
         if backend.poll() is not None:
-            sys.exit("Backend exited. Is MongoDB reachable? Check ECOS_MONGODB_URI / DB_URL in .env.")
+            sys.exit("Backend exited. Check the MongoDB settings (ECOS_MONGODB_URI / DB_URL in .env).")
         time.sleep(1)
     backend.terminate()
     sys.exit("Backend did not become healthy within 60 seconds.")

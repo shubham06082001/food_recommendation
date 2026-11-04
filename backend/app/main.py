@@ -1,29 +1,44 @@
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from pymongo.errors import PyMongoError
 
+from .core.catalog import ensure_catalog
 from .core.config import settings
-from .core.database import get_db, init_client
+from .core.database import get_db
 from .core.enrich import enrich_in_background
-from .core.seed import seed
+from .core.seed import bootstrap, seed_demo
+from .core.vectors import start_warm_up
 from .routers import (
     copilot, dashboard, feedback, forecasts, health, inventory, inventory_consumption, menus,
     orders, recipes, recommendations, uploads, users, wellness,
 )
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+for noisy in ("httpx", "httpcore", "sentence_transformers", "qdrant_client"):  # One INFO line per outgoing call otherwise.
+    logging.getLogger(noisy).setLevel(logging.WARNING)
+logger = logging.getLogger("ecos")
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    init_client()
-    if settings.seed_on_startup:
-        seed(get_db())
-    enrich_in_background(get_db())
+    """Start-up never depends on existing data: an empty database gets its indexes, manager and menu on its own."""
+    start_warm_up()
+    try:
+        db = get_db()  # Connects and creates indexes.
+        bootstrap(db)
+        if settings.seed_demo:
+            seed_demo(db)
+        ensure_catalog(db)
+        enrich_in_background(db)
+    except PyMongoError as error:  # The API still starts; /health reports 503 and requests retry the connection.
+        logger.error("Started without a database connection: %s", error)
     yield
 
 
-app = FastAPI(title="ECOS backend", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="ECOS backend", version="1.1.0", lifespan=lifespan)
 
 
 @app.exception_handler(PyMongoError)

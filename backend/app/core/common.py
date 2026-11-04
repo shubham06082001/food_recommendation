@@ -5,6 +5,7 @@ from uuid import uuid4
 from fastapi import Depends, Header, HTTPException
 
 from .database import get_db
+from .security import token_digest
 
 MEAL_PERIODS = ["breakfast", "snacks", "lunch", "dinner"]
 HEALTHY_TAGS = ["high_protein", "high_fibre", "balanced", "lower_sodium"]
@@ -32,12 +33,15 @@ def serialize(document: dict[str, Any]) -> dict[str, Any]:
     return document
 
 
-def current_user(x_user_id: str | None = Header(default=None)) -> dict[str, Any]:
-    if not x_user_id:
+def current_user(x_session_token: str | None = Header(default=None)) -> dict[str, Any]:
+    """Identity comes only from a live server-side session; a user ID alone proves nothing."""
+    if not x_session_token:
         raise HTTPException(status_code=401, detail="Login required")
-    user = get_db().users.find_one({"user_id": x_user_id})
+    db = get_db()
+    session = db.sessions.find_one({"token_hash": token_digest(x_session_token), "expires_at": {"$gt": now_utc()}})
+    user = db.users.find_one({"user_id": session["user_id"]}) if session else None
     if not user:
-        raise HTTPException(status_code=401, detail="Unknown user")
+        raise HTTPException(status_code=401, detail="Session expired; please log in again")
     return user
 
 
@@ -77,7 +81,17 @@ DIET_ALLOWED = {
     "non_vegetarian": {"veg", "egg", "non_veg"},
     "no_preference": {"veg", "egg", "non_veg"},
 }
-VEGAN_EXCLUDED_ALLERGENS = {"milk", "dairy", "egg"}
+VEGAN_EXCLUDED_ALLERGENS = {"milk", "egg"}
+ALLERGEN_CANON = {"dairy": "milk", "lactose": "milk", "gluten": "wheat", "eggs": "egg", "peanuts": "peanut"}
+
+
+def allergen_set(values: Any) -> set[str]:
+    """Canonical allergen names, so a 'gluten' exclusion also blocks 'wheat' dishes and 'dairy' blocks 'milk'."""
+    found: set[str] = set()
+    for value in values or []:
+        value = str(value).strip().lower()
+        found |= {"peanut", "tree nuts"} if value in ("nut", "nuts") else {ALLERGEN_CANON.get(value, value)}
+    return found
 
 
 def nutrition_tags(protein_g: float, fibre_g: float, sodium_mg: float, energy_kcal: float) -> list[str]:
@@ -98,10 +112,10 @@ def eligibility(recipe: dict[str, Any], preferences: dict[str, Any]) -> tuple[bo
     diet = preferences.get("dietary_preference") or "no_preference"
     if recipe.get("diet", "veg") not in DIET_ALLOWED.get(diet, DIET_ALLOWED["no_preference"]):
         return False, f"Not {diet.replace('_', ' ')}"
-    allergens = {a.lower() for a in recipe.get("declared_allergens", [])}
+    allergens = allergen_set(recipe.get("declared_allergens"))
     if diet == "vegan" and allergens & VEGAN_EXCLUDED_ALLERGENS:
         return False, "Contains animal products"
-    blocked = allergens & {a.lower() for a in preferences.get("declared_allergens", [])}
+    blocked = allergens & allergen_set(preferences.get("declared_allergens"))
     if blocked:
         return False, f"Contains {', '.join(sorted(blocked))}"
     return True, ""

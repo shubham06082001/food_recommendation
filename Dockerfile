@@ -1,22 +1,28 @@
-FROM harbor.tools.telstra.com/public-cache/library/python:3.12
+# Slim image for free-tier hosts: only what the app imports (no notebooks, TensorFlow or LangChain stack).
+# Override BASE_IMAGE to use a private registry mirror.
+ARG BASE_IMAGE=python:3.12-slim
+FROM ${BASE_IMAGE}
+
+ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 HF_HOME=/app/.cache/huggingface \
+    STREAMLIT_SERVER_HEADLESS=true STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
 
 WORKDIR /app
+COPY requirements.txt .
+# CPU-only torch keeps the image small; the embedding model is baked in so start-up needs no download.
+RUN pip install torch --index-url https://download.pytorch.org/whl/cpu \
+    && pip install -r requirements.txt \
+    && python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
 
-ENV UV_PYTHON_DOWNLOADS=never \
-    UV_LINK_MODE=copy \
-    PATH="/app/.venv/bin:$PATH"
+COPY app.py ./
+COPY backend ./backend
+COPY dashboard ./dashboard
+COPY ml ./ml
+COPY .streamlit ./.streamlit
 
-COPY pyproject.toml uv.lock ./
-RUN pip install --no-cache-dir uv && uv sync --frozen --no-install-project
+RUN useradd -m -u 1000 ecos && chown -R ecos:ecos /app
+USER ecos
 
-COPY . .
-RUN chmod +x start.sh
-
-# Override ECOS_MONGODB_URI at deploy time to point at your MongoDB.
-ENV ECOS_MONGODB_URI="mongodb://host.docker.internal:27017" \
-    ECOS_MONGODB_DB="Food_Recipe" \
-    STREAMLIT_SERVER_HEADLESS=true
-
-EXPOSE 8000 8501
-
+# Hosts inject PORT (Hugging Face Spaces uses 7860). Only the Streamlit UI listens publicly; the API stays on 127.0.0.1.
+ENV PORT=7860
+EXPOSE 7860
 CMD ["python", "app.py"]

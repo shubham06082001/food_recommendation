@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 
 from ..core.common import MEAL_PERIODS, now_utc, require_manager, serialize
 from ..core.database import get_db
-from ..core.menu import stock_map
+from ..core.menu import menu_filter, stock_map
 from ml.predictor import get_predictor, reload_predictor
 from ml.train import InsufficientHistory, train as train_models
 
@@ -29,11 +29,11 @@ class ForecastRequest(BaseModel):
     weeks: int = Field(default=4, ge=1, le=12)
 
 
-def _menu_for(db: Any, target: str, period: str) -> list[str]:
-    menu = db.menus.find_one({"date": target, "meal_period": period, "published": True})
-    if menu:
-        return [d for d in menu["dish_ids"] if d not in menu.get("paused_dish_ids", [])]
-    return [r["dish_id"] for r in db.recipes.find({"meal_periods": period, "evidence_status": "confirmed"})]
+def _dishes_for(db: Any, period: str, active: set[str]) -> dict[str, dict[str, Any]]:
+    """Menu dishes worth forecasting: stock-tracked ones, or any that have sold (idle catalog dishes carry no signal)."""
+    query = {**menu_filter(period), "evidence_status": "confirmed",
+             "$or": [{"ingredients.0": {"$exists": True}}, {"dish_id": {"$in": list(active)}}]}
+    return {r["dish_id"]: r for r in db.recipes.find(query, {"nutrient_profile": 0})}
 
 
 def run(db: Any, payload: ForecastRequest) -> dict[str, Any]:
@@ -43,7 +43,7 @@ def run(db: Any, payload: ForecastRequest) -> dict[str, Any]:
     orders = list(db.orders.find({"date": {"$in": history_dates}, "status": {"$ne": "cancelled"}}))
     observed_dates = {o["date"] for o in orders}
 
-    recipes = {r["dish_id"]: r for r in db.recipes.find({})}
+    recipes: dict[str, dict[str, Any]] = {}
     stock = stock_map(db)
     predictor = get_predictor()
     model_used = False
@@ -59,9 +59,10 @@ def run(db: Any, payload: ForecastRequest) -> dict[str, Any]:
                 sold[item["dish_id"]] += item["quantity"]
         days = len({o["date"] for o in period_orders})
         customers[period] = round(sum(len(u) for u in users_by_day.values()) / days, 1) if days else 0
-        dish_ids = [d for d in _menu_for(db, target.isoformat(), period) if d in recipes]
         history = list(db.orders.find({"meal_period": period, "status": {"$ne": "cancelled"}, "date": {
             "$lt": target.isoformat(), "$gte": (target - timedelta(days=HISTORY_DAYS)).isoformat()}}, HISTORY_FIELDS))
+        recipes = _dishes_for(db, period, {i["dish_id"] for o in history for i in o["items"]})
+        dish_ids = list(recipes)
         predicted = predictor.predict(history, period, target, dish_ids) or {"customers": None, "dishes": {}}
         if predicted["customers"] is not None:
             customers[period], model_used = round(predicted["customers"], 1), True

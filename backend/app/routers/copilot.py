@@ -140,8 +140,10 @@ def _sales(db: Any) -> tuple[str, list[str]]:
 
 @lru_cache(maxsize=1)
 def _llm() -> Any:
-    import utilities  # pylint: disable=import-outside-toplevel
-
+    try:
+        import utilities  # pylint: disable=import-outside-toplevel
+    except ImportError:  # The LLM stack is optional and not part of the slim deployment image.
+        return None
     if not (utilities.OPENAI_API_KEY and utilities.BASE_URL):
         return None
     return utilities.get_llm_model(model_name=os.getenv("ECOS_LLM_MODEL", utilities.MODEL_GPT_4O), temperature=0.2,

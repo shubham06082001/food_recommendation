@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+from uuid import uuid4
 
 import streamlit as st
 
@@ -12,13 +13,17 @@ from dashboard.state import change_quantity, go_to, remove_from_cart, toggle_car
 
 def _checkout() -> None:
     cart = st.session_state["gt_cart"]
+    # The same id is resent on retries, so a double click or timeout never creates two orders.
+    request_id = st.session_state.setdefault("gt_request_id", uuid4().hex)
     payload = {"items": [{"dish_id": d, "quantity": line["quantity"]} for d, line in cart.items()],
-               "recommended_dish_ids": [d for d, line in cart.items() if line.get("recommended")]}
+               "recommended_dish_ids": [d for d, line in cart.items() if line.get("recommended")],
+               "client_request_id": request_id}
     try:
         order = api.post("/orders", payload)
     except api.ApiError as error:
         st.session_state["gt_checkout_error"] = str(error)
         return
+    st.session_state.pop("gt_request_id", None)
     st.session_state["gt_cart"] = {}
     st.session_state["gt_cart_open"] = False
     # Stock changed, so recommendations may list dishes that are no longer available.

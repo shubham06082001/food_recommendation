@@ -1,6 +1,7 @@
 """Headless UI walkthrough of both journeys using Streamlit AppTest against a running test API.
 
-Run: ECOS_API_URL=http://localhost:8011/api/v1 .venv/bin/python -m dashboard.ui_smoke_test
+Run (backend on a throwaway DB, with ECOS_MANAGER_PASSWORD set; the same value is passed here):
+    ECOS_API_URL=http://localhost:8011/api/v1 ECOS_MANAGER_PASSWORD=... .venv/bin/python -m dashboard.ui_smoke_test
 """
 
 import os
@@ -10,11 +11,13 @@ import uuid
 from streamlit.testing.v1 import AppTest
 
 assert "ECOS_API_URL" in os.environ, "Point ECOS_API_URL at a test backend"
+MANAGER_PASSWORD = os.environ["ECOS_MANAGER_PASSWORD"]
+EMPLOYEE_PASSWORD = "Employee-Pass-1"
 failures: list[str] = []
 
 
-def check(label: str, at: AppTest, extra: bool = True) -> None:
-    problems = [e.value for e in at.exception] + [e.value for e in at.error]
+def check(label: str, at: AppTest, extra: bool = True, expect_error: bool = False) -> None:
+    problems = [e.value for e in at.exception] + ([] if expect_error else [e.value for e in at.error])
     ok = extra and not problems
     print(("PASS " if ok else "FAIL ") + label + ("" if ok else f" -> {problems or 'condition false'}"))
     if not ok:
@@ -31,12 +34,31 @@ def texts(at: AppTest) -> str:
     return "\n".join(str(p) for p in parts)
 
 
-at = AppTest.from_file("app.py", default_timeout=120)
+import time  # noqa: E402
+
+import httpx  # noqa: E402
+
+API = os.environ["ECOS_API_URL"]
+# A brand-new database must fill its menu from the Qdrant catalog without any manual step.
+for _ in range(90):
+    recipes = httpx.get(f"{API}/health", trust_env=False, timeout=10).json().get("recipes", 0)
+    if recipes >= 900:
+        break
+    time.sleep(2)
+print(f"     catalog recipes after start-up: {recipes}")
+
+at = AppTest.from_file("app.py", default_timeout=180)
 at.run()
+check("fresh database filled itself from the Qdrant catalog", at, recipes >= 900)
 check("login page renders", at, "Welcome to ECOS" in texts(at))
 
 employee = f"UI{uuid.uuid4().hex[:6].upper()}"
 at.text_input[0].input(employee)
+at.text_input[1].input("short")
+at.button[0].click().run()
+check("login without a valid password does not sign in", at, at.session_state["user_id"] is None, expect_error=True)
+at.text_input[0].input(employee)
+at.text_input[1].input(EMPLOYEE_PASSWORD)
 at.button[0].click().run()
 check("new employee lands on profile", at, at.session_state["gt_view"] == "Profile")
 
@@ -50,12 +72,9 @@ def metric(at: AppTest, label: str) -> str:
     return next((m.value for m in at.metric if m.label == label), "")
 
 
-import httpx  # noqa: E402
-
-
 def live_recs(at: AppTest) -> list[dict]:
-    response = httpx.post(f"{os.environ['ECOS_API_URL']}/recommendations", json={"meal_period": "lunch", "limit": 10},
-                          headers={"X-User-Id": at.session_state["user_id"]}, trust_env=False)
+    response = httpx.post(f"{API}/recommendations", json={"meal_period": "lunch", "limit": 20},
+                          headers={"X-Session-Token": at.session_state["gt_session"]}, trust_env=False)
     return response.json()["items"]
 
 
@@ -99,11 +118,18 @@ for mode in ("Plan my day", "Full menu"):
     nav(at, "Menu")
     at.segmented_control(key="gt_menu_mode").set_value(mode).run()
     check(f"menu view: {mode}", at)
+at.text_input(key="gt_menu_search").input("paneer").run()
+check("full menu search is paged and filtered", at, "matching “paneer”" in texts(at) and "Page 1 of" in texts(at))
 at.segmented_control(key="gt_menu_mode").set_value("For you").run()
 
 at.button(key="sign_out").click().run()
 check("sign out", at, at.session_state["user_id"] is None)
 at.text_input[0].input("MGR001")
+at.text_input[1].input("not-the-manager-password")
+at.button[0].click().run()
+check("manager login needs the real password", at, at.session_state["user_id"] is None, expect_error=True)
+at.text_input[0].input("MGR001")
+at.text_input[1].input(MANAGER_PASSWORD)
 at.button[0].click().run()
 check("manager login -> Today", at, at.session_state["gt_view"] == "Today")
 
@@ -114,9 +140,12 @@ check("employee order visible to manager", at, bool(advance))
 advance[0].click().run()
 check("advance order status", at, "→ preparing" in texts(at))
 
-for view in ("Inventory", "Menu management", "Executive"):
+for view in ("Inventory", "Executive"):
     nav(at, view)
     check(f"manager {view}", at)
+
+nav(at, "Menu management")
+check("manager menu management lists catalog recipes", at, "recipe(s)" in texts(at) and "Food catalog" in texts(at))
 
 nav(at, "Forecasting")
 at.button(key="FormSubmitter:forecast-Run forecast").click().run()

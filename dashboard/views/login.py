@@ -1,4 +1,4 @@
-"""Login: user ID only. Unknown IDs become employees; manager IDs must already exist."""
+"""Login: user ID and password. An unknown ID registers a new employee; the manager account comes from the server."""
 
 from __future__ import annotations
 
@@ -58,7 +58,8 @@ def write_cookie() -> None:
     token, max_age = pending
     if not re.fullmatch(r"[A-Za-z0-9_-]*", token):
         return
-    st.html(f"<script>document.cookie = '{COOKIE}={token}; Max-Age={int(max_age)}; Path=/; SameSite=Strict';</script>",
+    secure = "; Secure" if st.context.headers.get("x-forwarded-proto") == "https" else ""
+    st.html(f"<script>document.cookie = '{COOKIE}={token}; Max-Age={int(max_age)}; Path=/; SameSite=Strict{secure}';</script>",
             unsafe_allow_javascript=True)
 
 
@@ -71,16 +72,17 @@ def render_login() -> None:
         if st.session_state.pop("gt_expired", False):
             st.info("Your session expired after 30 minutes of inactivity. Please log in again.", icon=":material/timer_off:")
         with st.form("login", border=True):
-            user_id = st.text_input("User ID", placeholder="e.g. EMP001 or MGR001", max_chars=40)
+            user_id = st.text_input("User ID", placeholder="e.g. EMP001", max_chars=40)
+            password = st.text_input("Password", type="password", max_chars=128, help="At least 8 characters")
             submitted = st.form_submit_button("Log in", type="primary", width="stretch", icon=":material/login:")
-        st.caption("New ID? An employee account is created automatically. Manager IDs are provisioned by admin "
-                   "(demo manager: **MGR001**).")
+        st.caption("First time here? Enter a new user ID and choose a password; your employee account is created "
+                   "automatically. The manager account is set up by the administrator.")
         if submitted:
-            if not user_id.strip():
-                st.warning("Enter your user ID.", icon=":material/badge:")
+            if not user_id.strip() or not password:
+                st.warning("Enter your user ID and password.", icon=":material/badge:")
                 return
             try:
-                profile = api.post("/auth/login", {"user_id": user_id.strip()})
+                profile = api.post("/auth/login", {"user_id": user_id.strip(), "password": password})
             except api.ApiError as error:
                 st.error(str(error), icon=":material/error:")
                 return

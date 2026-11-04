@@ -11,7 +11,7 @@ import streamlit as st
 from dashboard import api
 from dashboard.config import MEAL_PERIODS, NEXT_STATUS, ORDER_STATUSES, STATUS_BADGE
 from dashboard.state import go_to
-from dashboard.utils import money, tag_badges
+from dashboard.utils import money
 
 
 def _pct(value: float | None) -> str:
@@ -289,7 +289,11 @@ def _update_stock(items: list[dict]) -> None:
                    "flagged Critical; zero stock is flagged Stockout. Every change is logged as a stock movement.")
         original = pd.DataFrame([{"ingredient_id": i["ingredient_id"], "name": i["name"], "quantity": i["quantity"],
                                   "unit": i["unit"], "reorder_point": i["reorder_point"],
-                                  "status": i["status"].title()} for i in items])
+                                  "status": i["status"].title()} for i in items],
+                                columns=["ingredient_id", "name", "quantity", "unit", "reorder_point", "status"])
+        if original.empty:
+            st.info("No ingredients yet. Add one below or upload an inventory file to start tracking stock.",
+                    icon=":material/inventory_2:")
         edited = st.data_editor(
             original, hide_index=True, key="inv_editor", disabled=["ingredient_id", "name", "unit", "status"],
             column_config={"quantity": st.column_config.NumberColumn("On hand", min_value=0.0),
@@ -307,7 +311,7 @@ def _update_stock(items: list[dict]) -> None:
             except api.ApiError as error:
                 st.error(str(error))
                 return
-            st.session_state["gt_flash"] = f"Updated {result['updated']} ingredient(s)"
+            st.session_state["gt_flash"] = f"Updated {len(changed)} ingredient(s)"
             st.rerun()
     with st.expander("Upload inventory from Excel", icon=":material/upload_file:"):
         st.caption("Download the template (pre-filled with current stock), edit it in Excel and upload. Columns: "
@@ -419,60 +423,128 @@ def _ingredient_detail(item: dict) -> None:
                 st.caption("No movements recorded yet.")
 
 
+RECIPE_PAGE = 20
+
+
+@st.fragment(run_every=10)
+def _catalog_panel() -> None:
+    status = api.load("/catalog/status")
+    if status is None:
+        return
+    with st.container(border=True):
+        cols = st.columns((3, 1), vertical_alignment="center")
+        cols[0].markdown(f"#### Food catalog · {status['recipes']} recipes · {status['on_menu']} on the menu")
+        state = "syncing…" if status["running"] else "sync failed" if status.get("error") else "up to date"
+        synced = (status.get("synced_at") or "never")[:16].replace("T", " ")
+        cols[0].caption(f"Source: Qdrant `food_nutrients` · last sync {synced} UTC · {state} · "
+                        f"{status['images']} dishes with a verified photo (others show a placeholder)")
+        if cols[1].button("Sync from Qdrant", icon=":material/sync:", width="stretch", disabled=status["running"]):
+            try:
+                api.post("/catalog/sync")
+            except api.ApiError as error:
+                st.error(str(error))
+        if status.get("error"):
+            st.error(f"Last sync failed: {status['error']}", icon=":material/error:")
+        st.caption("New and updated dishes arrive automatically; your menu choices, prices and meal periods are never overwritten.")
+
+
+def _save_recipes(updates: list[dict]) -> None:
+    try:
+        api.patch("/recipes", {"updates": updates})
+    except api.ApiError as error:
+        st.error(str(error))
+        return
+    api.recommendations.clear()
+    api.menu_page.clear()
+    st.session_state["mm_version"] = st.session_state.get("mm_version", 0) + 1  # Resets the editor's pending edits.
+    st.session_state["gt_flash"] = f"Saved changes to {len(updates)} recipe(s)"
+    st.rerun()
+
+
+def _bulk(on_menu: bool, query: str, period: str | None) -> None:
+    try:
+        result = api.post("/recipes/bulk-menu", {"on_menu": on_menu, "q": query, "meal_period": period})
+    except api.ApiError as error:
+        st.error(str(error))
+        return
+    api.recommendations.clear()
+    api.menu_page.clear()
+    st.session_state["mm_version"] = st.session_state.get("mm_version", 0) + 1
+    st.session_state["gt_flash"] = f"{'Added' if on_menu else 'Excluded'} {result['updated']} recipe(s)"
+    st.rerun()
+
+
+def _changes(before: pd.DataFrame, after: pd.DataFrame) -> list[dict]:
+    updates = []
+    for old, new in zip(before.to_dict("records"), after.to_dict("records")):
+        change: dict = {}
+        if new["On menu"] != old["On menu"]:
+            change["on_menu"] = bool(new["On menu"])
+        if pd.notna(new["Price"]) and new["Price"] != old["Price"]:
+            change["price"] = float(new["Price"])
+        periods = [p for p in MEAL_PERIODS if new[p.title()]]
+        if periods != [p for p in MEAL_PERIODS if old[p.title()]] and periods:
+            change["meal_periods"] = periods
+        if change:
+            updates.append({"dish_id": old["dish_id"], **change})
+    return updates
+
+
 def render_menu_management() -> None:
     st.caption("Menu")
     st.title("Menu management")
     _flash()
-    cols = st.columns(2)
-    menu_date = cols[0].date_input("Date", value=date.today(), min_value=date.today() - timedelta(days=1))
-    period = cols[1].selectbox("Meal period", MEAL_PERIODS, format_func=str.title)
-    recipes = api.load("/recipes")
-    current = api.load("/menu", meal_period=period, date=menu_date.isoformat())
-    if recipes is None or current is None:
+    _catalog_panel()
+    filters = st.columns((2.4, 1.2, 1.6), vertical_alignment="bottom")
+    query = filters[0].text_input("Search recipes", max_chars=80, placeholder="e.g. paneer, soup, cake",
+                                  icon=":material/search:").strip()
+    period = filters[1].selectbox("Meal period", ["All", *MEAL_PERIODS], format_func=str.title)
+    show = filters[2].segmented_control("Show", ["All", "On menu", "Excluded"], default="All", key="mm_show") or "All"
+    period_filter = None if period == "All" else period
+    page_key = f"mm_page_{query}_{period}_{show}"
+    page = st.session_state.get(page_key, 0)
+    data = api.load("/recipes", q=query or None, meal_period=period_filter, on_menu={"On menu": True, "Excluded": False}.get(show),
+                    limit=RECIPE_PAGE, offset=page * RECIPE_PAGE)
+    if data is None:
         return
-    by_id = {r["dish_id"]: r for r in recipes["data"]}
-    confirmed = [r["dish_id"] for r in recipes["data"] if r.get("evidence_status") == "confirmed"]
-    on_menu = list(dict.fromkeys(i["dish_id"] for i in current["items"]))
+    if not data["data"]:
+        st.info("No recipes found. A new database fills itself from the Qdrant catalog; use Sync if it is still empty.",
+                icon=":material/info:")
+        return
 
-    with st.container(border=True):
-        st.markdown(f"#### Publish {period} menu for {menu_date:%d %b}")
-        with st.form(f"publish_{period}_{menu_date}", border=False):
-            selected = st.multiselect("Dishes", confirmed, default=[d for d in on_menu if d in confirmed],
-                                      format_func=lambda d: f"{by_id[d]['name']} · {money(by_id[d]['price'])}")
-            if st.form_submit_button("Publish menu", type="primary", icon=":material/publish:"):
-                if not selected:
-                    st.warning("Select at least one dish.")
-                else:
-                    try:
-                        api.post("/menu", {"date": menu_date.isoformat(), "meal_period": period, "dish_ids": selected})
-                        st.session_state["gt_flash"] = f"Published {len(selected)} dish(es) for {period}"
-                        st.rerun()
-                    except api.ApiError as error:
-                        st.error(str(error))
-        unconfirmed = [r["name"] for r in recipes["data"] if r.get("evidence_status") != "confirmed"]
-        if unconfirmed:
-            st.caption(f"Not publishable until recipe evidence is confirmed: {', '.join(unconfirmed)}")
+    head = st.columns((3, 1.2), vertical_alignment="center")
+    head[0].markdown(f"#### {data['total']} recipe(s)")
+    with head[1].popover("Bulk actions", icon=":material/library_add_check:", width="stretch"):
+        st.caption(f"Applies to all {data['total']} recipes matching the current search and meal period.")
+        if st.button("Add all to menu", icon=":material/playlist_add:", width="stretch"):
+            _bulk(True, query, period_filter)
+        if st.button("Exclude all from menu", icon=":material/playlist_remove:", width="stretch"):
+            _bulk(False, query, period_filter)
 
-    st.markdown("#### Live availability")
-    if not current["items"]:
-        st.info("No published menu for this date and meal period.", icon=":material/info:")
-    for item in current["items"]:
-        with st.container(border=True):
-            row = st.columns((3, 1.2, 1.4, 1), vertical_alignment="center")
-            row[0].markdown(f"**{item['name']}** · {money(item['price'])}")
-            if item.get("nutrition_tags"):
-                row[0].markdown(tag_badges(item["nutrition_tags"]))
-            row[1].caption(f"{item['maximum_portions']} portions in stock")
-            row[2].markdown(":green-badge[Available]" if item["available"]
-                            else f":red-badge[{item['unavailable_reason']}]")
-            paused = item["unavailable_reason"] == "Paused by manager"
-            if row[3].button("Resume" if paused else "Pause", key=f"pause_{item['menu_id']}_{item['dish_id']}",
-                             width="stretch"):
-                try:
-                    api.patch(f"/menu/{item['menu_id']}/items/{item['dish_id']}", {"paused": not paused})
-                    st.rerun()
-                except api.ApiError as error:
-                    st.error(str(error))
+    before = pd.DataFrame([{
+        "dish_id": r["dish_id"], "On menu": r["on_menu"], "Dish": r["name"], "Diet": r["diet"].replace("_", "-"),
+        "Price": float(r["price"]), **{p.title(): p in r["meal_periods"] for p in MEAL_PERIODS},
+        "Stock": "tracked" if r["stock_tracked"] else "not tracked"} for r in data["data"]])
+    after = st.data_editor(
+        before, hide_index=True, key=f"mm_editor_{page_key}_{st.session_state.get('mm_version', 0)}", disabled=["dish_id", "Dish", "Diet", "Stock"],
+        column_config={"dish_id": None, "Price": st.column_config.NumberColumn("Price (₹)", min_value=1, max_value=5000, step=5),
+                       "On menu": st.column_config.CheckboxColumn("On menu"),
+                       "Stock": st.column_config.TextColumn("Stock", help="Only dishes with ingredient lines (recipe upload) use inventory")})
+    updates = _changes(before, after)
+    actions = st.columns((1.4, 1, 1, 3), vertical_alignment="center")
+    if actions[0].button(f"Save {len(updates)} change(s)", type="primary", icon=":material/save:", disabled=not updates,
+                         key="mm_save", width="stretch"):
+        _save_recipes(updates)
+    last_page = max(0, (data["total"] - 1) // RECIPE_PAGE)
+    actions[1].button("Previous", icon=":material/chevron_left:", disabled=page == 0, key="mm_prev", width="stretch",
+                      on_click=_turn_page, args=(page_key, -1))
+    actions[2].button("Next", icon=":material/chevron_right:", disabled=page >= last_page, key="mm_next", width="stretch",
+                      on_click=_turn_page, args=(page_key, 1))
+    actions[3].caption(f"Page {page + 1} of {last_page + 1} · unsaved edits on a page are lost when you change page")
+
+
+def _turn_page(key: str, step: int) -> None:
+    st.session_state[key] = max(0, st.session_state.get(key, 0) + step)
 
 
 def _model_panel() -> None:

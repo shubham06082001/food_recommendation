@@ -1,12 +1,15 @@
-fastapi
+# Runtime dependencies for deployment (torch is installed first from the CPU wheel index; see Dockerfile).
+fastapi>=0.162.0
 uvicorn[standard]
-streamlit
-requests
-pymongo
-qdrant-client
-pandas
-openpyxl
-scikit-learn
+streamlit>=1.55.0
+pymongo>=4.16.0
+qdrant-client>=1.17.0
+sentence-transformers>=5.3.0
+numpy>=2.5.2
+pandas>=3.0.5
+openpyxl>=3.1.5
+scikit-learn>=1.9.0
 joblib
 httpx
-truststore
+truststore>=0.10.0
+python-dotenv>=1.2.3

@@ -6,7 +6,7 @@ from collections import Counter, defaultdict
 from datetime import date, timedelta
 from typing import Any
 
-from .common import MEAL_PERIODS, eligibility
+from .common import MEAL_PERIODS, allergen_set, eligibility
 from .menu import menu_items
 from .semantic import semantic_scores
 
@@ -29,8 +29,11 @@ meal meals dish dishes eat eating have get any under below than less within upto
 filling heavy hearty low high lunch dinner breakfast snack snacks today now indian veg vegetarian vegan non protein
 fibre fiber salt sodium balanced healthy nutritious tasty good best option options calorie calories cal diet free
 avoid except excluding no allergic of to""".split())
-NEGATION = (r"\b(?:without|no|avoid|except|excluding|allergic to|free of)\s+(?:any\s+)?([a-z]+)", r"\b([a-z]+)\s+free\b")
+NEGATION = (r"\b(?:without|no|avoid|except|excluding|allergic to|free of)\s+(?:any\s+)?([a-z]+(?:\s+(?:and|or)\s+[a-z]+){0,3})",
+            r"\b([a-z]+)\s+free\b")
 PRICE = r"\b(?:under|below|less than|within|upto|up to|max|budget|around)\s{0,3}(?:rs|inr)?\s{0,3}(\d{2,4})\b"
+SEMANTIC_FLOOR = 0.35  # A non-literal match must be at least this similar...
+SEMANTIC_SHARE = 0.8   # ...and within this share of the best similarity.
 
 
 def _has(text: str, word: str, prefix: bool = False) -> bool:
@@ -40,7 +43,8 @@ def _has(text: str, word: str, prefix: bool = False) -> bool:
 def parse_query(text: str) -> dict[str, Any]:
     """Turn free text like 'light high protein dinner under 150 without paneer' into structured intent."""
     q = " " + re.sub(r"[^a-z0-9 ]+", " ", text.lower().replace("₹", " rs ")) + " "
-    excluded = {w for pattern in NEGATION for w in re.findall(pattern, q)} - {"preference", "salt", "sodium", "added"}
+    words = {w for pattern in NEGATION for found in re.findall(pattern, q) for w in re.split(r"\s+(?:and|or)\s+", found)}
+    excluded = words - {"preference", "salt", "sodium", "added"} - STOP
     allergens = {a for w in excluded for key, group in ALLERGEN_ALIASES.items() if w.startswith(key) for a in group}
     price = re.search(PRICE, q)
     intent: dict[str, Any] = {
@@ -85,12 +89,14 @@ def _history(db: Any, user_id: str) -> tuple[Counter, dict[str, date], dict[str,
 def _reject_reason(item: dict[str, Any], text: str, prefs: dict[str, Any], intent: dict[str, Any],
                    blocked: set[str], seen: set[str]) -> str:
     """Why a dish is excluded ('' = keep). Allergen, diet and budget rules are hard filters, never ranking hints."""
-    declared = {a.lower() for a in item.get("declared_allergens", [])}
+    declared = allergen_set(item.get("declared_allergens"))
     kcal = item.get("nutrition", {}).get("energy_kcal", 0)
     if not item["available"]:
         return "unavailable"
     if item["dish_id"] in seen:
         return "seen"
+    if item.get("component") and not intent["terms"]:
+        return "side item"
     if not eligibility(item, prefs)[0]:
         return "diet or allergen"
     if declared & blocked or any(_has(text, a) for a in blocked):
@@ -150,7 +156,7 @@ def _score(item: dict, text: str, matched: list[str], goal_hits: list[str], quer
 
 
 def recommend(db: Any, user: dict[str, Any], query: str, meal_period: str | None, limit: int,
-              exclude_dish_ids: list[str], period_from_query: bool = True) -> dict[str, Any]:
+              exclude_dish_ids: list[str], period_from_query: bool = True, offset: int = 0) -> dict[str, Any]:
     prefs = user.get("preferences", {})
     goals = [g for g in prefs.get("wellness_goals", []) if g in TAG_LABELS]
     diet = (prefs.get("dietary_preference") or "no_preference").replace("_", " ")
@@ -159,15 +165,14 @@ def recommend(db: Any, user: dict[str, Any], query: str, meal_period: str | None
     query = query.strip()
 
     names = {i["ingredient_id"]: i["name"].lower() for i in db.ingredients.find({}, {"ingredient_id": 1, "name": 1})}
-    pool: dict[str, dict[str, Any]] = {}
-    for item in sorted(menu_items(db, period), key=lambda i: i["meal_period"] != period):
-        pool.setdefault(item["dish_id"], item)
+    pool = {item["dish_id"]: item for item in menu_items(db, period, light=True)}
 
-    own_allergens = {a.lower() for a in prefs.get("declared_allergens", [])}
-    blocked = own_allergens | set(intent["excluded_allergens"])
+    own_allergens = allergen_set(prefs.get("declared_allergens"))
+    blocked = own_allergens | allergen_set(intent["excluded_allergens"])
     candidates, rejected = [], Counter()
     for item in pool.values():
-        text = " ".join([item["name"].lower(), *(names.get(i["ingredient_id"], "") for i in item["ingredients"])])
+        text = " ".join([item["name"].lower(), item.get("ingredient_text", ""),
+                         *(names.get(i["ingredient_id"], "") for i in item.get("ingredients", []))])
         reason = _reject_reason(item, text, prefs, intent, blocked, set(exclude_dish_ids))
         if reason:
             rejected[reason] += 1
@@ -182,7 +187,10 @@ def recommend(db: Any, user: dict[str, Any], query: str, meal_period: str | None
            "counts": counts, "last": last, "ratings": ratings, "popular": popular,
            "top_popular": max(popular.values(), default=0) or 1}
 
-    matches = [c for c in candidates if c[2]] if intent["terms"] else candidates
+    matches = candidates
+    if intent["terms"]:  # Literal word hits plus close semantic matches (e.g. 'cottage cheese' for 'paneer').
+        cutoff = max(SEMANTIC_FLOOR, SEMANTIC_SHARE * ctx["top_semantic"]) if scores else float("inf")
+        matches = [c for c in candidates if c[2] or scores.get(c[0].get("catalog_code"), 0.0) >= cutoff]
     note = ""
     if intent["terms"] and not matches:
         note = f"No dish matches “{' '.join(intent['terms'])}” exactly; showing the closest options for you."
@@ -203,11 +211,17 @@ def recommend(db: Any, user: dict[str, Any], query: str, meal_period: str | None
             "goal_matches": len(goal_hits), "match_percent": max(0, min(99, round(score * 100 + 40))),
             "reasons": _reasons(item, goal_hits, query_hits, matched, ctx), "_score": score})
     ranked.sort(key=lambda r: r["_score"], reverse=True)
+    page = ranked[offset:offset + limit]
+    profiles = {r["dish_id"]: r.get("nutrient_profile") for r in db.recipes.find(
+        {"dish_id": {"$in": [p["dish_id"] for p in page]}}, {"dish_id": 1, "nutrient_profile": 1})}
+    for row in page:
+        row["nutrient_profile"] = profiles.get(row["dish_id"])
     return {
         "query": query or base, "meal_period": period, "semantic_ranking": bool(scores),
         "interpreted": {k: v for k, v in intent.items() if v and k not in ("terms", "meal_period")},
-        "filtered_out": dict(rejected), "total_matches": len(ranked), "has_more": len(ranked) > limit,
-        "note": note, "items": [{k: v for k, v in r.items() if k != "_score"} for r in ranked[:limit]],
+        "filtered_out": dict(rejected), "total_matches": len(ranked), "offset": offset,
+        "has_more": len(ranked) > offset + limit, "note": note,
+        "items": [{k: v for k, v in r.items() if k != "_score"} for r in page],
     }
 
 

@@ -1,4 +1,5 @@
 import io
+import math
 from collections import defaultdict
 from typing import Any, Literal
 
@@ -45,7 +46,7 @@ def number(value: Any) -> float | None:
         result = float(value)
     except (TypeError, ValueError):
         return None
-    return None if pd.isna(result) else result
+    return None if pd.isna(result) or not math.isfinite(result) else result
 
 
 def text(value: Any) -> str:
@@ -123,11 +124,11 @@ async def upload_recipes(
                 "diet": diet, "meal_periods": periods, "catalog_code": text(raw.get("catalog_code")) or None,
                 "declared_allergens": [a.strip().lower() for a in text(raw.get("allergens")).split("|") if a.strip()],
                 "nutrition": nutrition, "nutrition_tags": nutrition_tags(**nutrition),
-                "evidence_status": text(raw.get("evidence_status")).lower() or "confirmed",
+                "evidence_status": text(raw.get("evidence_status")).lower() or "confirmed", "source": "manager",
             }
             image = text(raw.get("image_url"))
             if image.startswith("https://"):
-                dishes[dish_id]["image_url"] = image
+                dishes[dish_id].update({"image_url": image, "image_source": "manager"})
         lines[dish_id].append({"ingredient_id": ingredient_id, "quantity": quantity,
                                "unit": known[ingredient_id].get("unit")})
     if errors or mode == "validate":
@@ -137,6 +138,6 @@ async def upload_recipes(
         # Nutrients are re-derived from the (possibly new) catalog code by the background enrichment.
         db.recipes.update_one({"dish_id": dish_id},
                               {"$set": {**dish, "ingredients": lines[dish_id], "updated_at": now_utc()},
-                               "$unset": {"nutrient_profile": ""}}, upsert=True)
+                               "$setOnInsert": {"on_menu": True}, "$unset": {"nutrient_profile": ""}}, upsert=True)
     enrich_in_background(db)
     return {"success": True, "mode": mode, "updated": len(dishes), "errors": []}

@@ -1,14 +1,20 @@
 """Recipe enrichment stored on the recipe document (master data, not recommendations):
-macro + micronutrient profile from the INDB-based Qdrant `food_nutrients` collection, and an open-licence
-dish photo from Wikimedia Commons via the Wikipedia API."""
+nutrient profiles for legacy recipes, and open-licence dish photos from Wikimedia Commons.
+
+Photos are only accepted when the file title names the same dish (every word of the dish name) and does not
+mention a contradicting ingredient (e.g. mutton for a vegetable dish). No verified match means no photo.
+"""
 
 import logging
 import os
+import re
 import ssl
 import threading
+import time
 from typing import Any
 
 import httpx
+from qdrant_client.http import models
 
 from .common import now_utc
 
@@ -30,9 +36,44 @@ DAILY_REFERENCE = {"energy_kcal": 2000, "protein_g": 54, "carb_g": 275, "fat_g":
                    "magnesium_mg": 440, "zinc_mg": 17, "phosphorus_mg": 1000, "vita_ug": 1000, "vitb1_mg": 1.4,
                    "vitb2_mg": 2.0, "vitb3_mg": 14, "vitb6_mg": 1.9, "folate_ug": 300, "vitc_mg": 80, "vitd_ug": 15,
                    "vite_mg": 15, "vitk1_ug": 55}
-WIKI_API = "https://en.wikipedia.org/w/api.php"
-USER_AGENT = "ECOS-cafeteria-prototype/1.0 (internal demo; ecos-demo@example.com) httpx"
+COMMONS_API = "https://commons.wikimedia.org/w/api.php"
+USER_AGENT = "ECOS-cafeteria/1.0 (internal cafeteria app; ecos-demo@example.com) httpx"
 PROFILE_VERSION = 2
+IMAGE_VERSION = 3  # Bump to re-verify every photo with newer matching rules.
+IMAGE_WIDTH = 330  # A standard Wikimedia thumbnail size: small, and usually pre-rendered so it loads fast.
+REQUEST_PAUSE = 0.25
+
+FILLER = {"with", "and", "the", "for", "dry", "wet", "curry", "style", "plain"}
+SYNONYMS = {"veg": "vegetable", "veggie": "vegetable", "omlet": "omelette", "omelet": "omelette",
+            "biriyani": "biryani", "parantha": "paratha", "khichri": "khichdi", "daliya": "dalia",
+            "pakoda": "pakora", "cheela": "chilla", "laddoo": "ladoo", "chowmein": "chow"}
+
+
+def _stem(word: str) -> str:
+    word = SYNONYMS.get(word, word)
+    return word[:-1] if len(word) > 3 and word.endswith("s") and not word.endswith("ss") else word
+
+
+def _tokens(text: str, brackets: bool = False) -> set[str]:
+    """Significant words; bracketed text is ignored in dish names (aliases) but kept in file titles."""
+    text = text.lower() if brackets else re.sub(r"\([^)]*\)", " ", text.lower())
+    return {_stem(w) for w in re.findall(r"[a-z]+", text) if len(w) > 2 and w not in FILLER}
+
+
+MEAT = {_stem(w) for w in ("chicken mutton lamb beef pork bacon ham fish prawn shrimp crab lobster keema meat sausage "
+                           "salami turkey veal tuna salmon squid duck goat hamburger").split()}
+EGG = {"egg", "omelette"}
+PHOTO_NOISE = {"img", "image", "photo", "picture", "pic", "jpg", "home", "made", "homemade", "closeup", "close", "view",
+               "served", "plate", "bowl", "dsc", "front", "side", "fresh", "traditional"}
+EXTRA_WORDS = 3  # A longer title usually shows several dishes on one plate, which would not be factual for one dish.
+
+
+def image_matches(title: str, name: str, diet: str) -> bool:
+    """True only if the Commons file title names the dish and does not contradict its diet."""
+    wanted = _tokens(name)
+    found = _tokens(re.sub(r"^file:|\.[a-z0-9]+$", "", title.lower()), brackets=True) - PHOTO_NOISE
+    forbidden = MEAT | EGG if diet == "veg" else MEAT if diet == "egg" else set()
+    return bool(wanted) and wanted <= found and len(found) <= len(wanted) + EXTRA_WORDS and not found & forbidden
 
 
 def _serving_values(payload: dict[str, Any]) -> dict[str, float]:
@@ -62,72 +103,82 @@ def build_profile(recipe: dict[str, Any], payload: dict[str, Any]) -> dict[str, 
             "macros": rows(MACROS), "micros": rows(MICROS), "updated_at": now_utc()}
 
 
-def _qdrant_payloads(codes: list[str]) -> dict[str, dict[str, Any]]:
-    from qdrant_client.http import models
-
-    from .semantic import COLLECTION, _resources
-
-    client, _ = _resources()
-    points, _ = client.scroll(COLLECTION, limit=len(codes) + 5, with_vectors=False, scroll_filter=models.Filter(
-        must=[models.FieldCondition(key="food_code", match=models.MatchAny(any=codes))]))
-    return {p.payload["food_code"]: p.payload for p in points}
-
-
 def _http() -> httpx.Client:
     try:
-        import truststore  # Uses the OS trust store, so corporate TLS inspection certificates are honoured.
-        verify: Any = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        import truststore  # pylint: disable=import-outside-toplevel
+        verify: Any = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)  # Honours corporate TLS-inspection certificates.
     except ImportError:
         verify = True
     return httpx.Client(verify=verify, timeout=8, follow_redirects=True, headers={"User-Agent": USER_AGENT})
 
 
-def find_image(client: httpx.Client, term: str) -> dict[str, str]:
-    """Lead image of the best-matching Wikipedia article (Wikimedia Commons, open licences)."""
-    base = {"action": "query", "prop": "pageimages|info", "piprop": "thumbnail", "pithumbsize": 640,
-            "inprop": "url", "format": "json", "redirects": 1}
-    for params in ({"titles": term}, {"generator": "search", "gsrsearch": f"{term} dish", "gsrlimit": 1}):
-        pages = client.get(WIKI_API, params={**base, **params}).json().get("query", {}).get("pages", {})
-        page = next((p for p in pages.values() if p.get("thumbnail")), None)
-        if page:
-            return {"image_url": page["thumbnail"]["source"].split("?")[0], "image_credit": page.get("fullurl", "")}
-    return {"image_url": "", "image_credit": ""}
+def find_image(client: httpx.Client, name: str, diet: str) -> dict[str, str] | None:
+    """Best Commons photo whose title matches the dish, or None."""
+    params = {"action": "query", "generator": "search", "gsrnamespace": 6, "gsrsearch": name, "gsrlimit": 10,
+              "prop": "imageinfo", "iiprop": "url|mime", "iiurlwidth": IMAGE_WIDTH, "format": "json"}
+    pages = client.get(COMMONS_API, params=params).json().get("query", {}).get("pages", {})
+    for page in sorted(pages.values(), key=lambda p: p.get("index", 99)):
+        info = (page.get("imageinfo") or [{}])[0]
+        if info.get("mime") in ("image/jpeg", "image/png", "image/webp") and image_matches(page["title"], name, diet):
+            return {"image_url": (info.get("thumburl") or info["url"]).split("?")[0],
+                    "image_credit": info.get("descriptionurl", "")}
+    return None
+
+
+def _fill_profiles(db: Any) -> int:
+    """Legacy/manager recipes linked to the catalog by code get a nutrient profile from Qdrant."""
+    from . import vectors  # pylint: disable=import-outside-toplevel
+    from .semantic import COLLECTION  # pylint: disable=import-outside-toplevel
+
+    recipes = list(db.recipes.find({"catalog_code": {"$nin": [None, ""]}, "nutrient_profile.version": {"$ne": PROFILE_VERSION}}))
+    if not recipes:
+        return 0
+    try:
+        points, _ = vectors.qdrant().scroll(COLLECTION, limit=len(recipes) + 5, with_vectors=False,
+                                            scroll_filter=models.Filter(must=[models.FieldCondition(
+                                                key="food_code", match=models.MatchAny(any=[r["catalog_code"] for r in recipes]))]))
+    except Exception as error:  # Qdrant is optional; retried on the next run.
+        logger.warning("Nutrient enrichment unavailable: %s", error)
+        return 0
+    payloads = {p.payload["food_code"]: p.payload for p in points}
+    updated = 0
+    for recipe in recipes:
+        if payload := payloads.get(recipe["catalog_code"]):
+            db.recipes.update_one({"dish_id": recipe["dish_id"]}, {"$set": {"nutrient_profile": build_profile(recipe, payload)}})
+            updated += 1
+    return updated
+
+
+def _fill_images(db: Any) -> int:
+    todo = list(db.recipes.find({"image_version": {"$ne": IMAGE_VERSION}, "image_source": {"$ne": "manager"}},
+                                {"dish_id": 1, "name": 1, "diet": 1}).sort("on_menu", -1))
+    found_count, failures = 0, 0
+    with _http() as client:
+        for recipe in todo:
+            try:
+                found = find_image(client, recipe["name"], recipe.get("diet", "veg"))
+            except (httpx.HTTPError, ValueError) as error:
+                failures += 1
+                logger.warning("Image lookup failed for %s: %s", recipe["dish_id"], error)
+                if failures >= 5:  # Offline or blocked: stop and retry on the next run.
+                    break
+                continue
+            change = ({"$set": {**found, "image_version": IMAGE_VERSION}} if found else
+                      {"$set": {"image_version": IMAGE_VERSION}, "$unset": {"image_url": "", "image_credit": ""}})
+            db.recipes.update_one({"dish_id": recipe["dish_id"]}, change)
+            found_count += bool(found)
+            time.sleep(REQUEST_PAUSE)
+    return found_count
 
 
 def enrich_recipes(db: Any) -> int:
-    """Fill missing nutrient profiles and images; safe to call repeatedly (only missing fields are fetched)."""
+    """Fill missing nutrient profiles and verified images; safe to call repeatedly."""
     if os.getenv("ECOS_ENRICH", "true").lower() != "true" or not _lock.acquire(blocking=False):
         return 0
-    updated = 0
     try:
-        stale = {"nutrient_profile.version": {"$ne": PROFILE_VERSION}, "catalog_code": {"$nin": [None, ""]}}
-        recipes = list(db.recipes.find({"$or": [stale, {"image_url": {"$exists": False}}]}))
-        needs_profile = [r for r in recipes if r.get("catalog_code") and
-                         (r.get("nutrient_profile") or {}).get("version") != PROFILE_VERSION]
-        codes = [r["catalog_code"] for r in needs_profile]
-        try:
-            payloads = _qdrant_payloads(codes) if codes else {}
-        except Exception as error:  # Qdrant optional; retried on next startup.
-            logger.warning("Nutrient enrichment unavailable: %s", error)
-            payloads = {}
-        with _http() as client:
-            for recipe in recipes:
-                changes: dict[str, Any] = {}
-                payload = payloads.get(recipe.get("catalog_code"))
-                if payload and recipe in needs_profile:
-                    changes["nutrient_profile"] = build_profile(recipe, payload)
-                if "image_url" not in recipe:
-                    term = recipe.get("image_query") or (payload or {}).get("alias_name") or recipe["name"]
-                    try:
-                        changes.update(find_image(client, term))
-                    except (httpx.HTTPError, ValueError) as error:
-                        logger.warning("Image lookup failed for %s: %s", recipe["dish_id"], error)
-                if changes:
-                    db.recipes.update_one({"dish_id": recipe["dish_id"]}, {"$set": changes})
-                    updated += 1
+        return _fill_profiles(db) + _fill_images(db)
     finally:
         _lock.release()
-    return updated
 
 
 def enrich_in_background(db: Any) -> None:

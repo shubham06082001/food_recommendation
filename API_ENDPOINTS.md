@@ -20,7 +20,7 @@
 ```mermaid
 flowchart TB
     U["Users<br/>Employee · Manager"] --> FE["Streamlit dashboard<br/>(role-based views)"]
-    FE -- "HTTPS + JSON<br/>header X-User-Id" --> BE
+    FE -- "HTTPS + JSON<br/>header X-Session-Token" --> BE
     subgraph BE["FastAPI backend /api/v1"]
         UP[User & Profile] --- MC[Menu & Catalog] --- OR[Ordering] --- IN[Inventory] --- RE[Recommendations]
         FO[Forecasting] --- AN[Analytics & KPIs] --- PR[Procurement] --- FB[Feedback & Behaviour] --- CP[AI Copilot]
@@ -43,7 +43,7 @@ Excel upload → ingredients + recipes → Menu publish → Recommendation → O
 
 | Topic | Rule |
 |---|---|
-| Identity | Send header `X-User-Id: <id>` after `POST /auth/login` (demo identity, not real auth) |
+| Identity | `POST /auth/login` with `user_id` + `password` returns a `session_token`; send it as header `X-Session-Token` on every call. A user ID alone authenticates nothing. Tokens are stored hashed server-side and expire after 30 idle minutes |
 | Roles | `employee` (self-service) · `manager` (operations, procurement, leadership views) |
 | Auth levels used below | **public** · **user** (any logged-in) · **self/mgr** (own data or manager) · **employee** · **manager** |
 | Errors | `{"detail": "..."}` with `400` rule · `401` login · `403` role · `404` missing · `409` stock/concurrency · `413` file too large · `422` validation · `503` DB down |
@@ -61,12 +61,12 @@ Status: ✅ built and tested · 🟡 partial · ❌ not built.
 
 | Method | Path | Auth | Purpose | Dashboard screen |
 |---|---|---|---|---|
-| POST | `/auth/login` | public | Log in; unknown ID auto-creates an **employee** (managers are seeded only). Returns a `session_token` (30 min) | Login |
+| POST | `/auth/login` | public | `{user_id, password}`. An unknown ID **registers an employee** with that password (min 8 chars); the manager account comes from `ECOS_MANAGER_ID` / `ECOS_MANAGER_PASSWORD` (re-applied on every start). 5 wrong passwords lock the account for 5 minutes (429). Returns a `session_token` (30 min) | Login |
 | GET | `/auth/session` | header `X-Session-Token` | Restore a browser session after reload and slide its expiry another 30 min; 401 when expired | App start (cookie `ecos_session`) |
 | POST | `/auth/logout` | header `X-Session-Token` | Revoke the session | Sign out |
 | GET | `/users/{user_id}` | self/mgr | Read profile and preferences | Profile |
 | PUT | `/users/{user_id}/preferences` | employee (self) | Save diet, wellness goals, allergens, favourites (**consent required**) | Profile |
-| GET | `/users` | public | List users (`user_id, name, role, profile_complete` only) | — |
+| GET | `/users` | manager | List users (`user_id, name, role, profile_complete` only) | — |
 
 ```json
 // PUT /users/EMP001/preferences
@@ -79,7 +79,7 @@ Status: ✅ built and tested · 🟡 partial · ❌ not built.
 |---|---|---|
 | User management | 🟡 | Login auto-provisioning + `GET /users`; no role edit or deactivation |
 | Dietary preferences | ✅ | `PUT …/preferences` (`vegetarian / vegan / eggetarian / non_vegetarian / no_preference`) |
-| Allergen filters | ✅ | Stored on the user; enforced in `/menu?user_id=`, `/recommendations` |
+| Allergen filters | ✅ | Stored on the user (`gluten`≡`wheat`, `dairy`≡`milk`); flagged on `/menu`, filtered in `/recommendations`, and **enforced again at checkout** (409) |
 | Role-based access | 🟡 | 2 roles enforced on every write; Operations Team and Leadership use the **manager** role |
 
 ### 3.2 Menu & Catalog
@@ -87,20 +87,24 @@ Status: ✅ built and tested · 🟡 partial · ❌ not built.
 
 | Method | Path | Auth | Purpose | Dashboard screen |
 |---|---|---|---|---|
-| GET | `/recipes` | public | Dish catalogue (`?evidence_status=`) | Menu management |
-| POST | `/upload/recipes` | manager | Excel/CSV recipe + ingredient lines (`mode=validate\|commit`) | Inventory → Upload recipes |
-| GET | `/menu` | public | Published menu with **live availability** and max portions (`?meal_period&date&user_id`) | Employee Menu, Menu management |
-| POST | `/menu` | manager | Publish a menu for date + meal period | Menu management |
-| PATCH | `/menu/{menu_id}/items/{dish_id}` | manager | Pause / resume one dish `{"paused": true}` | Menu management |
+| GET | `/menu` | user | The orderable menu = every recipe a manager has not excluded, with **live availability**, eligibility for the caller, and paging/search (`?meal_period&q&limit&offset`). A completely empty catalog returns `catalog_empty: true` and triggers a background sync | Employee Menu |
+| GET | `/recipes` | manager | Whole catalog incl. excluded recipes (`?q&meal_period&on_menu&limit&offset`) | Menu management |
+| PATCH | `/recipes` | manager | Add/remove dishes from the menu, set price, set meal periods: `{"updates": [{"dish_id", "on_menu"?, "price"?, "meal_periods"?}]}` (max 200) | Menu management |
+| POST | `/recipes/bulk-menu` | manager | Include/exclude everything matching a search / meal period: `{"on_menu", "q", "meal_period"}` | Menu management |
+| GET | `/catalog/status` | manager | Last Qdrant sync (time, counts, error), recipes, on-menu, photos | Menu management |
+| POST | `/catalog/sync` | manager | Re-read the Qdrant catalog in the background (202). Manager choices are never overwritten | Menu management |
+| POST | `/upload/recipes` | manager | Excel/CSV recipe + ingredient lines for **stock-tracked** dishes (`mode=validate\|commit`) | Inventory → Upload recipes |
+
+**Where the menu comes from.** Recipes are synced from the Qdrant `food_nutrients` collection (one recipe per record, `dish_id = DISH_<food_code>`). The catalog owns name, diet, allergens and nutrition; managers own `on_menu`, `price`, `meal_periods` and stock lines, which are written only when a dish is first created. Diet is the catalog label, raised (never lowered) when the name/ingredients show meat or egg. Prices are **estimates** until a manager sets them. A new database syncs itself on start-up and whenever the menu is requested while empty; it re-syncs every `ECOS_CATALOG_REFRESH_HOURS` (24). Dishes without ingredient lines are not stock-tracked and are always orderable; dishes with lines (uploads, demo data) deduct inventory.
 
 **Recipe upload columns.** Required: `dish_id, dish_name, ingredient_id, quantity_per_portion`. Optional: `price, diet (veg|egg|non_veg), meal_periods (lunch|dinner), allergens (milk|wheat), protein_g, fibre_g, sodium_mg, energy_kcal, catalog_code, evidence_status`.
 Nutrition tags (`high_protein`, `high_fibre`, `lower_sodium`, `balanced`) are **computed automatically**.
 
 | Image feature | Status | Delivered by |
 |---|---|---|
-| Manage dishes/recipes | 🟡 | Bulk upload (upsert) + list; no single-dish edit/delete endpoint |
-| Menu publishing | ✅ | `POST /menu` (only `confirmed` recipes) |
-| Availability control | ✅ | Pause/resume + automatic “Ingredients out of stock” |
+| Manage dishes/recipes | ✅ | Qdrant catalog sync + `PATCH /recipes` (menu, price, periods) + bulk upload for stock lines |
+| Menu publishing | ✅ | A recipe is on the menu unless excluded (`PATCH /recipes`, `POST /recipes/bulk-menu`) |
+| Availability control | ✅ | Exclude from menu + automatic “Ingredients out of stock” for stock-tracked dishes |
 | Nutrition & allergens | ✅ | Stored per recipe; returned on menu + recommendations |
 
 ### 3.3 Ordering
@@ -271,7 +275,7 @@ No dedicated router. These existing endpoints cover procurement:
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| GET | `/health` | public | `{"status": "healthy", "database": "connected"}`; dashboard shows a reconnect banner if down |
+| GET | `/health` | public | `{"status": "healthy", "database": "connected", "recipes": n}`; 503 when MongoDB is unreachable (the API still starts and reconnects on the next request) |
 
 ---
 
@@ -296,8 +300,8 @@ Contract source: [API endpoints.txt](API%20endpoints.txt) (final “bare-minimum
 |---|---|---|
 | `POST /upload/inventory` | same | Column `threshold` → `reorder_point`; `ingredient_name` → `name`; `unit_cost` not stored |
 | `POST /upload/recipes` | same | Adds `diet`, `meal_periods`, nutrition columns |
-| `GET /menu`, `POST /menu` | same | + `PATCH /menu/{id}/items/{dish}` pause |
-| `POST /orders` | same | `user_id` comes from header, not body |
+| `GET /menu` | same | Paged/searchable; `POST /menu` replaced by `PATCH /recipes` (menu is the catalog minus exclusions) |
+| `POST /orders` | same | User comes from the session; optional `client_request_id` makes retries idempotent; diet/allergens re-checked; stock restored if a write fails |
 | `GET /orders` | same | |
 | `PATCH /orders/{order_id}` | `PATCH /orders/{order_id}/status` | |
 | `GET /inventory`, `GET /inventory/alerts` | same | |
@@ -319,11 +323,11 @@ Contract source: [API endpoints.txt](API%20endpoints.txt) (final “bare-minimum
 | 1 | Record waste | Inventory / Ops Team | S | `POST /inventory/{id}/waste` → movement `waste` |
 | 2 | Procurement view + supplier/lead time | Procurement | S | `GET /dashboard/procurement`; optional `supplier`, `lead_time_days` upload columns |
 | 3 | Waste forecast | Forecasting | M | Extend `/forecast/run` once #1 has data |
-| 4 | Real authentication | User & Profile | M | Replace `X-User-Id` with signed tokens |
+| 4 | ~~Real authentication~~ | User & Profile | done | Passwords (scrypt) + hashed server-side session tokens; add SSO/OIDC if the company needs it |
 | 5 | Scheduled jobs + KPI snapshots | Background Jobs | M | Nightly forecast + daily KPI snapshot |
 | 6 | LLM copilot | AI Copilot / LLM | M | LLM → existing intents |
 
-> ⚠️ **Security note:** `X-User-Id` is a demo identity, and anyone can send `MGR001`. Use real authentication before any shared deployment.
+> Security note: identity is a hashed server-side session token (passwords use scrypt). Keep the FastAPI port private (bound to 127.0.0.1) and expose only the Streamlit port; set a strong `ECOS_MANAGER_PASSWORD`.
 
 ---
 

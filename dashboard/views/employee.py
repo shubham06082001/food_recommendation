@@ -14,11 +14,13 @@ from dashboard.state import add_to_cart, go_to
 from dashboard.utils import money
 
 STATUS_STEPS = ["confirmed", "preparing", "ready", "collected"]
+HTTPS = "https://"
+MENU_PAGE_SIZE = 12
 
 
-def _recommendations(meal_period: str, query: str = "", limit: int = 6, exclude: tuple = ()) -> dict | None:
+def _recommendations(meal_period: str, query: str = "", limit: int = 6, offset: int = 0) -> dict | None:
     try:
-        return api.recommendations(st.session_state["user_id"], meal_period, query, limit, exclude)
+        return api.recommendations(st.session_state["user_id"], meal_period, query, limit, offset)
     except api.ApiError as error:
         st.error(str(error), icon=":material/error:")
         return None
@@ -38,9 +40,10 @@ def _amounts(dish: dict) -> dict[str, float]:
 def _card_html(dish: dict, score: int | None) -> str:
     name = html.escape(dish["name"])
     image = dish.get("image_url") or ""
-    top = (f'<img class="gt-card-img" src="{html.escape(image)}" alt="{name}" loading="lazy">'
-           if image.startswith("https://") else '<div class="gt-card-noimg">🍽️</div>')
-    if image.startswith("https://") and dish.get("image_credit", "").startswith("https://"):
+    top = (f'<img class="gt-card-img" src="{html.escape(image)}" alt="{name}" loading="lazy" decoding="async" '
+           f'width="330" height="170" referrerpolicy="no-referrer">'
+           if image.startswith(HTTPS) else '<div class="gt-card-noimg">🍽️</div>')
+    if image.startswith(HTTPS) and dish.get("image_credit", "").startswith(HTTPS):
         top += (f'<div class="gt-credit"><a href="{html.escape(dish["image_credit"])}" target="_blank" '
                 f'rel="noopener">Photo: Wikimedia Commons</a></div>')
     values = _amounts(dish)
@@ -169,13 +172,13 @@ def _delta(category: dict) -> str | None:
     return None if change is None else f"{change:+.1f} pts vs last month"
 
 
-def _show_more(key: tuple, dish_ids: list[str]) -> None:
-    seen = st.session_state.setdefault("gt_seen", {})
-    seen[key] = seen.get(key, []) + dish_ids
+def _show_more(key: tuple, step: int) -> None:
+    offsets = st.session_state.setdefault("gt_offsets", {})
+    offsets[key] = offsets.get(key, 0) + step
 
 
 def _reset_seen(key: tuple) -> None:
-    st.session_state.setdefault("gt_seen", {}).pop(key, None)
+    st.session_state.setdefault("gt_offsets", {}).pop(key, None)
     api.recommendations.clear()
 
 
@@ -217,9 +220,9 @@ def _render_for_you(period: str) -> None:
         cols[1].form_submit_button("Search", icon=":material/search:", width="stretch")
 
     query = query.strip()
-    seen = st.session_state.setdefault("gt_seen", {})
     key = (period, query)
-    recs = _recommendations(period, query, exclude=tuple(seen.get(key, [])))
+    offset = st.session_state.setdefault("gt_offsets", {}).get(key, 0)
+    recs = _recommendations(period, query, offset=offset)
     if recs:
         st.markdown("#### Recommended for you")
         mode = "Semantic ranking (Qdrant)" if recs["semantic_ranking"] else "Goal-based ranking"
@@ -230,30 +233,54 @@ def _render_for_you(period: str) -> None:
             st.info(recs["note"], icon=":material/info:")
         actions = st.columns((1.2, 1.2, 3))
         actions[0].button("Show different options", icon=":material/shuffle:", disabled=not recs["has_more"],
-                          on_click=_show_more, args=(key, [i["dish_id"] for i in recs["items"]]))
+                          on_click=_show_more, args=(key, len(recs["items"])))
         actions[1].button("Refresh", icon=":material/refresh:", on_click=_reset_seen, args=(key,))
         if recs["items"]:
             cols = st.columns(3)
             for index, dish in enumerate(recs["items"]):
                 with cols[index % 3]:
                     dish_card(dish, f"rec_{period}_{dish['dish_id']}", dish["reasons"])
-        elif seen.get(key):
+        elif offset:
             st.info("You've seen every match. Press Refresh to start over.", icon=":material/info:")
         else:
             st.info("No dishes match your preferences and search for this meal period.", icon=":material/info:")
 
 
+def _turn_page(key: str, step: int) -> None:
+    st.session_state[key] = max(0, st.session_state.get(key, 0) + step)
+
+
 def _render_full_menu(period: str) -> None:
-    menu = api.load("/menu", meal_period=period, user_id=st.session_state["user_id"])
-    if menu is None:
+    query = st.text_input("Search the menu", placeholder="e.g. paneer, idli, soup", max_chars=80,
+                          key="gt_menu_search", icon=":material/search:").strip()
+    page_key = f"gt_menu_page_{period}_{query}"
+    page = st.session_state.get(page_key, 0)
+    try:
+        menu = api.menu_page(st.session_state["user_id"], period, query, MENU_PAGE_SIZE, page * MENU_PAGE_SIZE)
+    except api.ApiError as error:
+        st.error(str(error), icon=":material/cloud_off:")
         return
+    if menu["catalog_empty"]:
+        st.info("The menu is being prepared from the food catalog. This takes a moment on a new database.",
+                icon=":material/hourglass_top:")
+        st.button("Check again", icon=":material/refresh:", on_click=api.menu_page.clear)
+        return
+    total = menu["total"]
     st.markdown(f"#### Full {period} menu")
+    st.caption(f"{total} dish(es)" + (f" matching “{query}”" if query else ""))
     if not menu["items"]:
-        st.info(f"No {period} menu has been published today.", icon=":material/info:")
+        st.info("No dishes found.", icon=":material/info:")
     cols = st.columns(3)
-    for index, dish in enumerate(sorted(menu["items"], key=lambda d: (not d["available"], d["name"]))):
+    for index, dish in enumerate(menu["items"]):
         with cols[index % 3]:
             dish_card(dish, f"menu_{period}_{dish['dish_id']}")
+    last_page = max(0, (total - 1) // MENU_PAGE_SIZE)
+    nav = st.columns((1, 1, 4), vertical_alignment="center")
+    nav[0].button("Previous", icon=":material/chevron_left:", disabled=page == 0, key="gt_menu_prev",
+                  on_click=_turn_page, args=(page_key, -1), width="stretch")
+    nav[1].button("Next", icon=":material/chevron_right:", disabled=page >= last_page, key="gt_menu_next",
+                  on_click=_turn_page, args=(page_key, 1), width="stretch")
+    nav[2].caption(f"Page {page + 1} of {last_page + 1}")
 
 
 def _add_plan(meals: list[dict]) -> None:

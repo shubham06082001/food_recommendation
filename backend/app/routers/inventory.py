@@ -160,7 +160,8 @@ def stock_risk(_: dict = Depends(require_manager), db: Any = Depends(get_db)) ->
     """Today's menu risk: stockouts, over-demand (lost revenue), low-stock dishes and slow movers (waste)."""
     demand, basis = daily_demand(db)
     stock = stock_map(db)
-    dishes = {i["dish_id"]: i for i in menu_items(db)}.values()
+    dishes = [d for d in {i["dish_id"]: i for i in menu_items(db, light=True)}.values()
+              if d.get("ingredients") or demand.get(d["dish_id"])]
     available = [d for d in dishes if d["available"]]
     average = sum(demand.get(d["dish_id"], 0) for d in dishes) / max(len(dishes), 1)
     at_risk, slow = [], []

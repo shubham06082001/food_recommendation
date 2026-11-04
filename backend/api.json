@@ -2,11 +2,11 @@
   "baseUrl": "http://localhost:8000/api/v1",
   "docs": "http://localhost:8000/docs",
   "auth": {
-    "header": "X-User-Id",
+    "header": "X-Session-Token",
     "roles": ["employee", "manager"],
     "levels": {
       "public": "no header needed",
-      "user": "any logged-in user (401 if header missing/unknown)",
+      "user": "any logged-in user (401 if the session token is missing, unknown or expired)",
       "self_or_manager": "own user_id, or a manager (403 otherwise)",
       "employee": "employee role only",
       "manager": "manager role only (403 for employees)"
@@ -20,7 +20,7 @@
       "architectureModule": "Platform",
       "routes": {
         "health": {"method": "GET", "path": "/health", "auth": "public",
-                   "response": {"status": "healthy", "database": "connected"}}
+                   "response": {"status": "healthy", "database": "connected", "recipes": "int"}}
       }
     },
     "userProfile": {
@@ -28,11 +28,11 @@
       "collections": ["users"],
       "routes": {
         "login": {"method": "POST", "path": "/auth/login", "auth": "public",
-                  "body": {"user_id": "string ^[A-Za-z0-9_-]{2,40}$"},
+                  "body": {"user_id": "string ^[A-Za-z0-9_-]{2,40}$", "password": "string 8-128 chars"},
                   "response": {"user_id": "string", "name": "string", "role": "employee|manager",
                                "profile_complete": "bool", "next_screen": "employee_home|manager_home",
                                "session_token": "string", "session_minutes": 30},
-                  "notes": "Unknown IDs auto-create an employee; managers are seeded only. Session stored in `sessions` (TTL index)."},
+                  "notes": "Unknown IDs register an employee with this password; the manager comes from ECOS_MANAGER_ID/ECOS_MANAGER_PASSWORD (re-applied on every start). 5 wrong passwords lock the account for 5 minutes (429). Sessions are stored hashed in `sessions` (TTL index)."},
         "session": {"method": "GET", "path": "/auth/session", "auth": "header X-Session-Token",
                     "response": "login profile + expires_at", "notes": "Slides expiry 30 min; 401 when expired."},
         "logout": {"method": "POST", "path": "/auth/logout", "auth": "header X-Session-Token",
@@ -54,13 +54,27 @@
     },
     "menuCatalog": {
       "architectureModule": "Menu & Catalog",
-      "collections": ["recipes", "menus", "ingredients"],
+      "collections": ["recipes", "ingredients", "meta"],
       "routes": {
-        "listRecipes": {"method": "GET", "path": "/recipes", "auth": "public", "query": ["evidence_status"],
-                        "response": {"success": true, "data": [{"dish_id": "string", "name": "string", "price": "number",
-                                     "diet": "veg|egg|non_veg", "meal_periods": ["string"], "declared_allergens": ["string"],
-                                     "nutrition": "object", "nutrition_tags": ["string"], "ingredients": ["line"],
-                                     "evidence_status": "string"}]}},
+        "listRecipes": {"method": "GET", "path": "/recipes", "auth": "manager",
+                        "query": ["q", "meal_period", "on_menu", "limit (<=100, default 25)", "offset"],
+                        "response": {"success": true, "total": "int", "data": [{"dish_id": "string", "name": "string", "price": "number",
+                                     "price_source": "estimated|manager", "diet": "veg|egg|non_veg", "on_menu": "bool",
+                                     "meal_periods": ["string"], "declared_allergens": ["string"], "stock_tracked": "bool",
+                                     "source": "qdrant|manager", "image_url": "https url (optional)"}]}},
+        "updateRecipes": {"method": "PATCH", "path": "/recipes", "auth": "manager",
+                          "body": {"updates": [{"dish_id": "string", "on_menu": "bool (optional)", "price": "number (optional)",
+                                                "meal_periods": ["breakfast|snacks|lunch|dinner (optional)"]}]},
+                          "response": {"success": true, "updated": "int"}, "notes": "Up to 200 updates; 404 for unknown dish ids."},
+        "bulkMenu": {"method": "POST", "path": "/recipes/bulk-menu", "auth": "manager",
+                     "body": {"on_menu": "bool", "q": "string (name search)", "meal_period": "optional"},
+                     "response": {"success": true, "matched": "int", "updated": "int"}},
+        "catalogStatus": {"method": "GET", "path": "/catalog/status", "auth": "manager",
+                          "response": {"synced_at": "ISO", "attempted_at": "ISO", "created": "int", "refreshed": "int",
+                                       "skipped": "int", "error": "string|null", "running": "bool", "recipes": "int",
+                                       "on_menu": "int", "images": "int"}},
+        "syncCatalog": {"method": "POST", "path": "/catalog/sync", "auth": "manager", "status": 202,
+                        "notes": "Re-reads Qdrant food_nutrients in the background. New dishes are added; manager choices (on_menu, price, meal_periods, stock lines) are never overwritten."},
         "uploadRecipes": {"method": "POST", "path": "/upload/recipes", "auth": "manager",
                           "contentType": "multipart/form-data",
                           "fields": {"file": ".xlsx|.csv (<=5 MB)", "mode": "validate|commit (default commit)"},
@@ -69,18 +83,14 @@
                                               "fibre_g", "sodium_mg", "energy_kcal", "catalog_code", "evidence_status"],
                           "response": {"success": "bool", "mode": "string", "updated": "int", "errors": ["string"]},
                           "notes": "All-or-nothing: any invalid row means nothing is written."},
-        "getMenu": {"method": "GET", "path": "/menu", "auth": "public", "query": ["meal_period", "user_id", "date"],
-                    "response": {"meal_period": "string", "date": "YYYY-MM-DD",
-                                 "items": [{"dish_id": "string", "menu_id": "string", "available": "bool",
-                                            "unavailable_reason": "string", "maximum_portions": "int",
-                                            "eligible": "bool (when user_id given)", "eligibility_note": "string"}]}},
-        "publishMenu": {"method": "POST", "path": "/menu", "auth": "manager",
-                        "body": {"date": "YYYY-MM-DD", "meal_period": "breakfast|snacks|lunch|dinner",
-                                 "dish_ids": ["string (confirmed recipes only)"]},
-                        "response": {"success": true, "menu_id": "string", "dish_count": "int"}},
-        "pauseMenuItem": {"method": "PATCH", "path": "/menu/{menu_id}/items/{dish_id}", "auth": "manager",
-                          "body": {"paused": "bool"},
-                          "response": {"success": true, "menu_id": "string", "dish_id": "string", "paused": "bool"}}
+        "getMenu": {"method": "GET", "path": "/menu", "auth": "user",
+                    "query": ["meal_period", "q (name search)", "limit (<=60, default 12)", "offset"],
+                    "response": {"meal_period": "string", "query": "string", "total": "int", "offset": "int", "limit": "int",
+                                 "catalog_empty": "bool (true on a brand-new database; a sync is started)",
+                                 "items": [{"dish_id": "string", "name": "string", "price": "number", "diet": "string",
+                                            "available": "bool", "unavailable_reason": "string", "maximum_portions": "int",
+                                            "stock_tracked": "bool", "eligible": "bool", "eligibility_note": "string"}]},
+                    "notes": "The menu is every recipe not excluded by a manager. Eligibility is computed for the caller."}
       }
     },
     "ordering": {
@@ -89,7 +99,7 @@
       "routes": {
         "createOrder": {"method": "POST", "path": "/orders", "auth": "employee",
                         "body": {"items": [{"dish_id": "string", "quantity": "int 1-10"}],
-                                 "recommended_dish_ids": ["string"]},
+                                 "recommended_dish_ids": ["string"], "client_request_id": "string 8-64 chars (optional; reuse on retry)"},
                         "response": {"success": true, "order_id": "string", "pickup_reference": "string",
                                      "total": "number", "status": "confirmed"},
                         "notes": "Mock payment (payment=demo_paid). Atomic conditional stock deduction; 409 + full rollback if any ingredient is short."},
@@ -167,7 +177,7 @@
       "routes": {
         "recommend": {"method": "POST", "path": "/recommendations", "auth": "user",
                       "body": {"meal_period": "breakfast|snacks|lunch|dinner|null (query can set it)", "query": "string<=200",
-                               "limit": "int 1-20", "exclude_dish_ids": ["string"]},
+                               "limit": "int 1-20", "offset": "int (next page)", "exclude_dish_ids": ["string"]},
                       "response": {"query": "string", "meal_period": "string?", "semantic_ranking": "bool",
                                    "interpreted": "object (tags, max_price, excluded_terms, excluded_allergens ...)",
                                    "filtered_out": "object", "total_matches": "int", "has_more": "bool", "note": "string",
