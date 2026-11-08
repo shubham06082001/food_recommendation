@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="1080" viewBox="0 0 1500 1080" role="img" aria-labelledby="title desc">
+  <title id="title">ECOS logical module dependencies</title>
+  <desc id="desc">Profile and catalog inform recommendations. Recommendations feed ordering; ordering draws stock, supplies feedback and analytics. Forecasting uses history and recipes to estimate ingredient requirements; inventory risk and forecasts inform simplified procurement. The copilot reads operational evidence. Shared MongoDB data is the integration boundary.</desc>
+  <defs><marker id="a" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#587085"/></marker><style>text{font-family:Arial,sans-serif;fill:#12354a}.title{font-size:30px;font-weight:bold}.h{font-size:21px;font-weight:bold}.t{font-size:17px}.s{font-size:16px}.b{fill:#fff;stroke:#8daec5;stroke-width:2}.l{fill:none;stroke:#587085;stroke-width:2.5;marker-end:url(#a)}</style></defs>
+  <rect width="1500" height="1080" rx="18" fill="#f3f7fa"/>
+  <text x="45" y="52" class="title">ECOS | Ten architecture modules, connected by business events</text>
+  <text x="45" y="84" class="t">Logical dependencies and shared evidence; connectors do not imply a message broker or microservice RPC.</text>
+  <rect x="50" y="125" width="350" height="110" rx="14" class="b"/><text x="75" y="164" class="h">1. User &amp; Profile</text><text x="75" y="195" class="t">Diet, consent, allergens, roles</text><text x="75" y="221" class="s">Eligibility input</text>
+  <rect x="575" y="125" width="350" height="110" rx="14" class="b"/><text x="600" y="164" class="h">2. Menu &amp; Catalog</text><text x="600" y="195" class="t">Dishes, price, meal period, recipes</text><text x="600" y="221" class="s">Qdrant sync / manager choices</text>
+  <rect x="1100" y="125" width="350" height="110" rx="14" fill="#f4edff" stroke="#a28ac2" stroke-width="2"/><text x="1125" y="164" class="h">5. Recommendations</text><text x="1125" y="195" class="t">Eligible live options and reasons</text><text x="1125" y="221" class="s">Rules + optional semantics</text>
+  <path d="M400 150 H555 V105 H1275 V125" class="l"/><path d="M925 180 H1100" class="l"/>
+  <rect x="1100" y="345" width="350" height="110" rx="14" fill="#fff0f5" stroke="#c588a3" stroke-width="2"/><text x="1125" y="385" class="h">3. Ordering</text><text x="1125" y="417" class="t">Checkout, lifecycle, mock payment</text><text x="1125" y="443" class="s">Checkout revalidates eligibility</text>
+  <path d="M1275 235 V345" class="l"/><text x="1290" y="291" class="s">Selected meals</text>
+  <rect x="575" y="345" width="350" height="110" rx="14" fill="#e9f8f2" stroke="#7ea998" stroke-width="2"/><text x="600" y="385" class="h">4. Inventory</text><text x="600" y="417" class="t">Stock, movements, dish capacity</text><text x="600" y="443" class="s">Only recipes with stock lines deduct</text>
+  <path d="M1100 390 H925" class="l"/><text x="950" y="374" class="s">Deduct / return</text>
+  <path d="M750 345 V270 H1050 V210 H1100" class="l"/><text x="775" y="295" class="s">Availability</text>
+  <rect x="50" y="345" width="350" height="110" rx="14" class="b"/><text x="75" y="385" class="h">6. Forecasting</text><text x="75" y="417" class="t">History, baseline / gated models</text><text x="75" y="443" class="s">Prep portions + ingredient needs</text>
+  <path d="M750 235 V290 H225 V345" class="l"/><text x="375" y="280" class="s">Recipe quantities</text>
+  <path d="M1100 435 H1000 V505 H225 V455" class="l"/><text x="660" y="495" class="s">Order history</text>
+  <rect x="50" y="585" width="350" height="120" rx="14" fill="#fff6e8" stroke="#bca070" stroke-width="2"/><text x="75" y="624" class="h">8. Procurement (simplified)</text><text x="75" y="657" class="t">Shortfalls, affected dishes, reorder</text><text x="75" y="685" class="s">No purchase-order / supplier workflow</text>
+  <path d="M225 455 V585" class="l"/><path d="M575 420 H460 V645 H400" class="l"/>
+  <rect x="575" y="585" width="350" height="120" rx="14" class="b"/><text x="600" y="624" class="h">7. Analytics &amp; KPIs</text><text x="600" y="657" class="t">Manager, employee, executive</text><text x="600" y="685" class="s">Order values, not audited revenue</text>
+  <path d="M750 455 V585" class="l"/>
+  <rect x="1100" y="585" width="350" height="120" rx="14" class="b"/><text x="1125" y="624" class="h">9. Feedback &amp; Behaviour</text><text x="1125" y="657" class="t">Ratings, repeat orders, wellness</text><text x="1125" y="685" class="s">Tags are not medical outcomes</text>
+  <path d="M1275 455 V585" class="l"/><path d="M1100 645 H925" class="l"/>
+  <rect x="575" y="815" width="350" height="110" rx="14" fill="#f4edff" stroke="#a28ac2" stroke-width="2"/><text x="600" y="854" class="h">10. AI Copilot (read-only)</text><text x="600" y="886" class="t">Operational evidence to explanations</text><text x="600" y="912" class="s">No direct data modification</text>
+  <path d="M750 705 V815" class="l"/><text x="775" y="762" class="s">Live evidence, including stock and forecasts</text>
+  <text x="50" y="990" class="t">Shared foundation: FastAPI authorization and MongoDB records. Four persona boxes in the target become two enforced roles.</text>
+  <text x="50" y="1024" class="s">Manager decisions close the loop: adjust menu, replenish stock, revise preparation, investigate feedback and monitor subsequent service.</text>
+  <text x="50" y="1054" class="s">This figure summarizes dependencies, not every function call. See api.json for exhaustive HTTP operations.</text>
+</svg>

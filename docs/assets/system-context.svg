@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="920" viewBox="0 0 1440 920" role="img" aria-labelledby="title desc">
+  <title id="title">ECOS implemented system context</title>
+  <desc id="desc">Employees and managers use Streamlit, which calls FastAPI with session tokens. FastAPI uses synchronous PyMongo to persist operational records. Qdrant supplies the catalog and optional semantic ranking. Forecasts and copilot support managerial decisions. Dashed connectors identify optional integrations.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#46657a"/></marker>
+    <style>text{font-family:Arial,sans-serif;fill:#12354a} .title{font-size:30px;font-weight:bold}.h{font-size:22px;font-weight:bold}.t{font-size:18px}.s{font-size:16px}.box{fill:#fff;stroke:#a8c4d5;stroke-width:2}.line{fill:none;stroke:#46657a;stroke-width:2.5;marker-end:url(#arrow)}.optional{stroke-dasharray:8 6}</style>
+  </defs>
+  <rect width="1440" height="920" rx="18" fill="#f3f7fa"/>
+  <text x="50" y="52" class="title">ECOS | Implemented system context</text>
+  <text x="50" y="82" class="t">Source-grounded integration view; not a deployment certification or live screenshot</text>
+  <rect x="50" y="120" width="365" height="110" rx="14" class="box"/>
+  <text x="75" y="157" class="h">Employee</text><text x="75" y="187" class="t">Preferences, meals, orders, feedback</text><text x="75" y="212" class="s">Personal wellness guidance, not clinical advice</text>
+  <rect x="475" y="120" width="440" height="110" rx="14" class="box"/>
+  <text x="500" y="157" class="h">Manager</text><text x="500" y="187" class="t">Service, stock, menus, forecasts, KPIs</text><text x="500" y="212" class="s">Operations and leadership share this role</text>
+  <path d="M232 230 V270 H440 V300" class="line"/><path d="M695 230 V270 H620 V300" class="line"/>
+  <rect x="120" y="300" width="820" height="105" rx="14" fill="#eaf3ff" stroke="#77a6d9" stroke-width="2"/>
+  <text x="150" y="339" class="h">Streamlit role-based dashboard</text><text x="150" y="370" class="t">UI actions and HTTP client | short-lived menu / recommendation caches</text>
+  <path d="M530 405 V470" class="line"/><text x="550" y="445" class="s">JSON + X-Session-Token; responses return to UI</text>
+  <rect x="120" y="470" width="820" height="145" rx="14" fill="#e9f8f2" stroke="#60aa8b" stroke-width="2"/>
+  <text x="150" y="509" class="h">FastAPI modular application | /api/v1</text>
+  <text x="150" y="542" class="t">Authentication, rules, availability, orders, stock, recommendations</text>
+  <text x="150" y="572" class="t">Forecasts, analytics, feedback, wellness and read-only copilot</text>
+  <text x="150" y="598" class="s">Architecture modules are logical capabilities, not independently deployed microservices</text>
+  <path d="M530 615 V690" class="line"/><text x="550" y="657" class="s">Synchronous PyMongo reads / writes</text>
+  <rect x="120" y="690" width="820" height="130" rx="14" fill="#eef2fa" stroke="#8b9dbf" stroke-width="2"/>
+  <text x="150" y="728" class="h">MongoDB | operational system of record</text>
+  <text x="150" y="760" class="t">Users / sessions, recipes, ingredients, orders, movements, feedback</text>
+  <text x="150" y="791" class="t">Forecast records and menu-related data; local MongoDB or Atlas</text>
+  <rect x="1010" y="300" width="380" height="150" rx="14" class="box"/>
+  <text x="1035" y="338" class="h">Qdrant: food_nutrients</text>
+  <text x="1035" y="372" class="t">Primary catalog ingestion source</text><text x="1035" y="401" class="t">Optional semantic enrichment</text><text x="1035" y="430" class="s">Fresh empty database needs a catalog path</text>
+  <path d="M940 510 H975 V385 H1010" class="line"/>
+  <rect x="1010" y="490" width="380" height="130" rx="14" class="box"/>
+  <text x="1035" y="528" class="h">Optional LLM</text><text x="1035" y="561" class="t">Rephrases evidence-based answers</text><text x="1035" y="592" class="s">Rule-based answers work without it</text>
+  <path d="M940 555 H1010" class="line optional"/>
+  <rect x="1010" y="660" width="380" height="160" rx="14" class="box"/>
+  <text x="1035" y="698" class="h">Demand models / enrichment</text><text x="1035" y="733" class="t">Local model artifacts + baseline</text><text x="1035" y="765" class="t">Optional dish-photo lookup</text><text x="1035" y="796" class="s">No general-purpose scheduler implied</text>
+  <path d="M940 590 H975 V710 H1010" class="line"/>
+  <text x="50" y="868" class="s">Solid: implemented interaction. Dashed: optional integration. Public entry point: UI; launcher keeps backend on loopback.</text>
+  <text x="50" y="896" class="s">Interpretation of repository implementation, November 2026. Target architecture remains separately available as Architecture.png.</text>
+</svg>

@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1460" height="880" viewBox="0 0 1460 880" role="img" aria-labelledby="title desc">
+  <title id="title">ECOS order and stock lifecycle</title>
+  <desc id="desc">Employee selects meals and sends checkout with a retry identifier. Backend validates identity, recipes, eligibility, price and stock, applies tracked stock deductions and creates a confirmed demo-payment order. Manager moves it through preparing, ready and collected. Cancellation from confirmed or preparing returns stock. Collected meals inform monthly wellness. Business controls require validation in an isolated test database.</desc>
+  <defs><marker id="a" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#526f84"/></marker><style>text{font-family:Arial,sans-serif;fill:#12354a}.title{font-size:30px;font-weight:bold}.h{font-size:21px;font-weight:bold}.t{font-size:18px}.s{font-size:16px}.b{fill:#fff;stroke:#95b3c9;stroke-width:2}.l{fill:none;stroke:#526f84;stroke-width:2.5;marker-end:url(#a)}</style></defs>
+  <rect width="1460" height="880" rx="18" fill="#f3f7fa"/>
+  <text x="45" y="54" class="title">ECOS | Order-to-service and inventory control loop</text>
+  <text x="45" y="88" class="t">Mock payment only. Logical workflow, not a claim of multi-document database transaction atomicity.</text>
+  <rect x="50" y="140" width="360" height="135" rx="14" class="b"/><text x="75" y="180" class="h">1. Select and submit</text><text x="75" y="214" class="t">Employee cart + request identifier</text><text x="75" y="246" class="s">Same identifier reused for checkout retries</text>
+  <rect x="550" y="140" width="360" height="135" rx="14" class="b"/><text x="575" y="180" class="h">2. Revalidate on server</text><text x="575" y="214" class="t">Role, eligibility, dish, quantity, stock</text><text x="575" y="246" class="s">Do not trust client price / availability</text>
+  <rect x="1050" y="140" width="360" height="135" rx="14" class="b"/><text x="1075" y="180" class="h">3. Record service commitment</text><text x="1075" y="214" class="t">Tracked ingredient deductions + log</text><text x="1075" y="246" class="s">Order total + mock payment + pickup code</text>
+  <path d="M410 205 H550" class="l"/><path d="M910 205 H1050" class="l"/>
+  <path d="M1230 275 V320 H215 V390" class="l"/>
+  <rect x="70" y="390" width="290" height="90" rx="14" fill="#eaf3ff" stroke="#8daec5" stroke-width="2"/><text x="120" y="444" class="h">Confirmed</text>
+  <rect x="415" y="390" width="290" height="90" rx="14" fill="#fff6e8" stroke="#bea575" stroke-width="2"/><text x="475" y="444" class="h">Preparing</text>
+  <rect x="760" y="390" width="290" height="90" rx="14" fill="#e9f8f2" stroke="#7ea998" stroke-width="2"/><text x="855" y="444" class="h">Ready</text>
+  <rect x="1105" y="390" width="290" height="90" rx="14" fill="#e9f8f2" stroke="#7ea998" stroke-width="2"/><text x="1170" y="444" class="h">Collected</text>
+  <path d="M360 435 H415" class="l"/><path d="M705 435 H760" class="l"/><path d="M1050 435 H1105" class="l"/>
+  <text x="450" y="366" class="s">Manager advances valid state transitions</text>
+  <rect x="200" y="595" width="505" height="115" rx="14" fill="#fff0f2" stroke="#bb8c99" stroke-width="2"/><text x="225" y="634" class="h">Cancelled</text><text x="225" y="667" class="t">Return tracked stock; retain movement evidence</text><text x="225" y="695" class="s">UI offers cancellation before ready; terminal state</text>
+  <path d="M215 480 V555 H350 V595" class="l"/><path d="M560 480 V595" class="l"/>
+  <rect x="870" y="595" width="525" height="115" rx="14" class="b"/><text x="895" y="634" class="h">Feedback, wellness and service evidence</text><text x="895" y="667" class="t">Feedback available for ready / collected orders</text><text x="895" y="695" class="s">Monthly wellness counts collected portions</text>
+  <path d="M1250 480 V595" class="l"/>
+  <text x="50" y="770" class="t">Inventory loop: deductions change dish capacity; low-stock alerts and forecasts inform replenishment before the next service.</text>
+  <text x="50" y="807" class="s">Evidence limits: retry handling and conditional stock updates are code controls; concurrency, failure recovery and end-to-end outcomes require testing.</text>
+  <text x="50" y="844" class="s">Catalog-only dishes without ingredient lines are not stock-tracked. Never use them to demonstrate inventory depletion.</text>
+</svg>
