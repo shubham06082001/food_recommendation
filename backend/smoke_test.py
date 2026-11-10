@@ -86,7 +86,10 @@ def pure_checks() -> None:
           and not enrich.image_matches("File:Veg biryani (chicken).jpg", "Vegetable biryani", "veg")
           and not enrich.image_matches("File:Biryani.jpg", "Vegetable biryani", "veg")
           and not enrich.image_matches("File:Paneer curry with lamb mince and samosas and rice.jpg", "Paneer curry", "veg")
-          and enrich.image_matches("File:Mutton biryani.jpg", "Mutton biryani", "non_veg"))
+          and enrich.image_matches("File:Mutton biryani.jpg", "Mutton biryani", "non_veg")
+          and not enrich._diet_safe("File:Chicken curry.jpg", "veg")
+          and not enrich._diet_safe("File:Egg curry.jpg", "veg")
+          and enrich._diet_safe("File:Paneer curry.jpg", "veg"))
     check("password hashing", verify_password("S3cret-pass", hash_password("S3cret-pass"))
           and not verify_password("wrong", hash_password("S3cret-pass")) and not verify_password("x", "garbage"))
     check("allergen aliases are symmetrical",

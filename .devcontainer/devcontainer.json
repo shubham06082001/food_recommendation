@@ -1,12 +1,20 @@
 {
   "name": "ecos-dev",
-  "image": "harbor.tools.telstra.com/public-cache/library/python:3.12",
+  "image": "python:3.12-bookworm",
+  "initializeCommand": ["python3", "${localWorkspaceFolder}/.devcontainer/services.py"],
+  "runArgs": ["--add-host=host.docker.internal:host-gateway"],
+  "mounts": ["source=ecos-model-cache,target=/root/.cache/huggingface,type=volume"],
   "postCreateCommand": "bash .devcontainer/setup.sh",
+  "postStartCommand": "bash .devcontainer/start.sh",
+  "waitFor": "postStartCommand",
+  "shutdownAction": "stopContainer",
   "forwardPorts": [8000, 8501],
   "remoteEnv": {
-    "ECOS_MONGODB_URI": "mongodb://host.docker.internal:20000",
     "ECOS_MONGODB_DB": "Food_Recipe",
-    "PATH": "/workspaces/Food_Recommendation/.venv/bin:${containerEnv:PATH}"
+    "ECOS_MODEL_LOCAL_ONLY": "true",
+    "NO_PROXY": "localhost,127.0.0.1,host.docker.internal,${containerEnv:NO_PROXY}",
+    "no_proxy": "localhost,127.0.0.1,host.docker.internal,${containerEnv:no_proxy}",
+    "PATH": "/opt/ecos-venv/bin:${containerEnv:PATH}"
   },
   "customizations": {
     "jetbrains": { "backend": "IntelliJ" }

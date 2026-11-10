@@ -207,6 +207,7 @@ def recommend(db: Any, user: dict[str, Any], query: str, meal_period: str | None
             "declared_allergens": item.get("declared_allergens", []), "diet": item.get("diet"),
             "maximum_portions": item["maximum_portions"], "semantic_score": scores.get(item.get("catalog_code"), 0.0),
             "image_url": item.get("image_url", ""), "image_credit": item.get("image_credit", ""),
+            "image_is_fallback": item.get("image_is_fallback", False),
             "nutrient_profile": item.get("nutrient_profile"),
             "goal_matches": len(goal_hits), "match_percent": max(0, min(99, round(score * 100 + 40))),
             "reasons": _reasons(item, goal_hits, query_hits, matched, ctx), "_score": score})

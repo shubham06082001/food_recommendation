@@ -1,4 +1,5 @@
 .env
+.devcontainer/host-ca.pem
 .venv/
 __pycache__/
 *.pyc

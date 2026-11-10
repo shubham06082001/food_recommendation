@@ -44,8 +44,9 @@ def _card_html(dish: dict, score: int | None) -> str:
            f'width="330" height="170" referrerpolicy="no-referrer">'
            if image.startswith(HTTPS) else '<div class="gt-card-noimg">🍽️</div>')
     if image.startswith(HTTPS) and dish.get("image_credit", "").startswith(HTTPS):
+        credit = "Representative photo: Wikimedia Commons" if dish.get("image_is_fallback") else "Photo: Wikimedia Commons"
         top += (f'<div class="gt-credit"><a href="{html.escape(dish["image_credit"])}" target="_blank" '
-                f'rel="noopener">Photo: Wikimedia Commons</a></div>')
+            f'rel="noopener">{credit}</a></div>')
     values = _amounts(dish)
     macros = "".join(f"<div><b>{values.get(k, 0):.0f}{unit}</b><small>{label}</small></div>" for k, unit, label in (
         ("protein_g", "g", "protein"), ("carb_g", "g", "carbs"), ("fat_g", "g", "fat"), ("energy_kcal", "", "kcal")))

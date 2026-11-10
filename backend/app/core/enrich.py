@@ -39,9 +39,12 @@ DAILY_REFERENCE = {"energy_kcal": 2000, "protein_g": 54, "carb_g": 275, "fat_g":
 COMMONS_API = "https://commons.wikimedia.org/w/api.php"
 USER_AGENT = "ECOS-cafeteria/1.0 (internal cafeteria app; ecos-demo@example.com) httpx"
 PROFILE_VERSION = 2
-IMAGE_VERSION = 3  # Bump to re-verify every photo with newer matching rules.
+IMAGE_VERSION = 4  # Bump to re-verify every photo with newer matching rules.
 IMAGE_WIDTH = 330  # A standard Wikimedia thumbnail size: small, and usually pre-rendered so it loads fast.
 REQUEST_PAUSE = 0.25
+FALLBACK_SEARCH = {"veg": "Indian vegetarian food", "egg": "Indian egg dish", "non_veg": "Indian meat dish"}
+_fallback_images: dict[str, dict[str, Any]] = {}
+_fallback_attempted: set[str] = set()
 
 FILLER = {"with", "and", "the", "for", "dry", "wet", "curry", "style", "plain"}
 SYNONYMS = {"veg": "vegetable", "veggie": "vegetable", "omlet": "omelette", "omelet": "omelette",
@@ -66,14 +69,30 @@ EGG = {"egg", "omelette"}
 PHOTO_NOISE = {"img", "image", "photo", "picture", "pic", "jpg", "home", "made", "homemade", "closeup", "close", "view",
                "served", "plate", "bowl", "dsc", "front", "side", "fresh", "traditional"}
 EXTRA_WORDS = 3  # A longer title usually shows several dishes on one plate, which would not be factual for one dish.
+FILE_EXTENSION = re.compile(r"\.[a-z0-9]+$")
+
+
+def _title_tokens(title: str) -> set[str]:
+    title = FILE_EXTENSION.sub("", title.lower().removeprefix("file:"))
+    return _tokens(title, brackets=True)
+
+
+def _forbidden_ingredients(diet: str) -> set[str]:
+    if diet == "veg":
+        return MEAT | EGG
+    return MEAT if diet == "egg" else set()
 
 
 def image_matches(title: str, name: str, diet: str) -> bool:
     """True only if the Commons file title names the dish and does not contradict its diet."""
     wanted = _tokens(name)
-    found = _tokens(re.sub(r"^file:|\.[a-z0-9]+$", "", title.lower()), brackets=True) - PHOTO_NOISE
-    forbidden = MEAT | EGG if diet == "veg" else MEAT if diet == "egg" else set()
-    return bool(wanted) and wanted <= found and len(found) <= len(wanted) + EXTRA_WORDS and not found & forbidden
+    found = _title_tokens(title) - PHOTO_NOISE
+    return (bool(wanted) and wanted <= found and len(found) <= len(wanted) + EXTRA_WORDS
+            and not found & _forbidden_ingredients(diet))
+
+
+def _diet_safe(title: str, diet: str) -> bool:
+    return not _title_tokens(title) & _forbidden_ingredients(diet)
 
 
 def _serving_values(payload: dict[str, Any]) -> dict[str, float]:
@@ -112,17 +131,53 @@ def _http() -> httpx.Client:
     return httpx.Client(verify=verify, timeout=8, follow_redirects=True, headers={"User-Agent": USER_AGENT})
 
 
-def find_image(client: httpx.Client, name: str, diet: str) -> dict[str, str] | None:
-    """Best Commons photo whose title matches the dish, or None."""
-    params = {"action": "query", "generator": "search", "gsrnamespace": 6, "gsrsearch": name, "gsrlimit": 10,
+def _search_images(client: httpx.Client, query: str) -> list[dict[str, Any]]:
+    params = {"action": "query", "generator": "search", "gsrnamespace": 6, "gsrsearch": query, "gsrlimit": 30,
               "prop": "imageinfo", "iiprop": "url|mime", "iiurlwidth": IMAGE_WIDTH, "format": "json"}
     pages = client.get(COMMONS_API, params=params).json().get("query", {}).get("pages", {})
-    for page in sorted(pages.values(), key=lambda p: p.get("index", 99)):
-        info = (page.get("imageinfo") or [{}])[0]
-        if info.get("mime") in ("image/jpeg", "image/png", "image/webp") and image_matches(page["title"], name, diet):
-            return {"image_url": (info.get("thumburl") or info["url"]).split("?")[0],
-                    "image_credit": info.get("descriptionurl", "")}
-    return None
+    return sorted(pages.values(), key=lambda page: page.get("index", 99))
+
+
+def _image_details(page: dict[str, Any], representative: bool = False) -> dict[str, Any] | None:
+    info = (page.get("imageinfo") or [{}])[0]
+    if info.get("mime") not in ("image/jpeg", "image/png", "image/webp"):
+        return None
+    url = info.get("thumburl") or info.get("url", "")
+    if not url:
+        return None
+    return {"image_url": url, "image_credit": info.get("descriptionurl", ""),
+            "image_is_fallback": representative}
+
+
+def _representative_image(client: httpx.Client, diet: str) -> dict[str, Any] | None:
+    if diet not in _fallback_attempted:
+        for page in _search_images(client, FALLBACK_SEARCH.get(diet, FALLBACK_SEARCH["veg"])):
+            if _diet_safe(page.get("title", ""), diet) and (result := _image_details(page, True)):
+                _fallback_images[diet] = result
+                break
+        _fallback_attempted.add(diet)
+    return _fallback_images.get(diet)
+
+
+def find_image(client: httpx.Client, name: str, diet: str) -> dict[str, Any] | None:
+    """Find a recipe photo, then reuse a diet-safe representative photo if no exact match exists."""
+    pages = _search_images(client, name)
+    for page in pages:
+        if image_matches(page["title"], name, diet) and (result := _image_details(page)):
+            return result
+    wanted = _tokens(name)
+    candidates = []
+    for page in pages:
+        title = page.get("title", "")
+        found = _title_tokens(title) - PHOTO_NOISE
+        overlap = len(wanted & found)
+        minimum = 1 if len(wanted) == 1 else 2
+        if overlap >= minimum and _diet_safe(title, diet):
+            candidates.append((overlap / len(wanted), page))
+    for _, page in sorted(candidates, key=lambda match: match[0], reverse=True):
+        if result := _image_details(page):
+            return result
+    return _representative_image(client, diet)
 
 
 def _fill_profiles(db: Any) -> int:
@@ -164,7 +219,8 @@ def _fill_images(db: Any) -> int:
                     break
                 continue
             change = ({"$set": {**found, "image_version": IMAGE_VERSION}} if found else
-                      {"$set": {"image_version": IMAGE_VERSION}, "$unset": {"image_url": "", "image_credit": ""}})
+                      {"$set": {"image_version": IMAGE_VERSION},
+                       "$unset": {"image_url": "", "image_credit": "", "image_is_fallback": ""}})
             db.recipes.update_one({"dish_id": recipe["dish_id"]}, change)
             found_count += bool(found)
             time.sleep(REQUEST_PAUSE)
